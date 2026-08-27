@@ -201,6 +201,19 @@ def read_planillas(f):
     out["Total Pagado"]=pd.to_numeric(d[total],errors="coerce")
     if out["Total Pagado"].isna().all() and valor:
         out["Total Pagado"]=pd.to_numeric(d[valor].astype(str).str.replace("$","",regex=False).str.replace(".","",regex=False).str.replace(",",".",regex=False),errors="coerce")
+
+    # Trazabilidad del pago real.
+    numero=col("NUMERO DE PLANILLA","NÚMERO DE PLANILLA")
+    fpago=col("FECHA PAGO")
+    fgen=col("FECHA GENERACION","FECHA GENERACIÓN")
+    venc=col("VENCIMIENTO")
+    mesp=col("MES PAGADO")
+    out["Número de planilla"]=d[numero] if numero else ""
+    out["Fecha generación"]=pd.to_datetime(d[fgen],errors="coerce") if fgen else pd.NaT
+    out["Fecha pago"]=pd.to_datetime(d[fpago],errors="coerce") if fpago else pd.NaT
+    out["Vencimiento"]=pd.to_datetime(d[venc],errors="coerce") if venc else pd.NaT
+    out["Mes pagado"]=d[mesp].fillna("").astype(str).str.strip() if mesp else ""
+
     out=out[out["Tipo IESS"].ne("") & out["Total Pagado"].notna()].copy()
     return out
 
@@ -212,7 +225,7 @@ def build_iess_plan_compare(iess,plan):
     base=float(iess['Sueldo IESS'].sum())
     expected={
       'DIVPRE':np.nan,  # El consolidado entregado no trae el préstamo; el rol queda como control.
-      'PLANI':float(iess['Individual IESS'].sum()+iess['Patronal IESS'].sum()+base*0.01),
+      'PLANI':float(iess['Individual IESS'].sum()+iess['Patronal IESS'].sum()+iess['Valor CCC'].sum()),
       'FONDOS':np.nan,
       'PLTJEM':np.nan,
       'EXTSALCY':np.nan
@@ -272,7 +285,7 @@ def build_accounting(roles,iess,benefits,planillas):
         grat=float(r['Otros Ingresos'].sum())
         sueldo=max(base-ot,0.0)
         patronal=float(i['Patronal IESS'].sum())
-        secap=base*0.01
+        secap=float(i['Valor CCC'].sum())
         fr=float(b['FR Causado'].sum())
         xiii=float(b['XIII Causado'].sum())
         xiv=float(b['XIV Causado'].sum())
@@ -281,7 +294,7 @@ def build_accounting(roles,iess,benefits,planillas):
         debit(f'{prefix}.2',f'Sobretiempos {suffix}',ot,'Rol: suplementarias + extraordinarias + recargo',tipo_rol)
         debit(f'{prefix}.3',f'Gratificaciones {suffix}',grat,'OTROS INGRESOS DEL ROL',tipo_rol)
         debit(f'{prefix}.5',f'Aportes Patronales al IESS {suffix}',patronal,'Consolidado IESS por trabajador',tipo_rol)
-        debit(f'{prefix}.6',f'Secap - Iece {suffix}',secap,'1% materia gravada IESS',tipo_rol)
+        debit(f'{prefix}.6',f'Secap - Iece {suffix}',secap,'SUMA Valor CCC real del Consolidado IESS por trabajador',tipo_rol)
         debit(f'{prefix}.7',f'Fondos de Reserva {suffix}',fr,'IESS / 12 para personal con derecho; grupo separado',tipo_rol)
         debit(f'{prefix}.8',f'Décimo Tercer Sueldo {suffix}',xiii,'Materia gravada IESS / 12',tipo_rol)
         debit(f'{prefix}.9',f'Décimo Cuarto Sueldo {suffix}',xiv,'SBU 482 / 12 proporcional días IESS',tipo_rol)
@@ -301,7 +314,7 @@ def build_accounting(roles,iess,benefits,planillas):
     credit('2.1.7.6.2','Décimo Cuarto Sueldo',xiv_acc,'Acumulado: celda XIV vacía')
     credit('2.1.7.6.4','11.15% Aportes Patronales I.E.S.S.',ii['Patronal IESS'].sum(),'Consolidado IESS')
     secap_total=sum(r['Debe'] for r in rows if 'Secap - Iece' in r['Cuenta'])
-    credit('2.1.7.6.5','1% Secap - Iece',secap_total,'1% materia gravada IESS por grupo')
+    credit('2.1.7.6.5','1% Secap - Iece',secap_total,'SUMA Valor CCC real del Consolidado IESS')
     # Si existe planilla FONDOS, el valor efectivamente pagado queda como fuente prioritaria para el pago.
     # En el asiento de rol se conserva el acumulado calculado; la conciliación muestra la diferencia real.
     credit('2.1.7.6.6','Fondos de Reservas',fr_acc_calc,'Acumulado calculado; validar vs planilla FONDOS real')
@@ -323,9 +336,9 @@ def build_payment_accounting(iess,planillas):
     Si consolidado y planilla difieren, la contabilidad del pago toma la planilla real.
     """
     base=float(iess['Sueldo IESS'].sum())
-    cons_plani=float(iess['Individual IESS'].sum()+iess['Patronal IESS'].sum()+base*0.01)
+    cons_plani=float(iess['Individual IESS'].sum()+iess['Patronal IESS'].sum()+iess['Valor CCC'].sum())
     items=[
-      ('PLANI','Aportes IESS + SECAP/IECE',cons_plani),
+      ('PLANI','Aportes IESS + CCC/SECAP-IECE según Consolidado',cons_plani),
       ('DIVPRE','Préstamos Quirografarios',np.nan),
       ('FONDOS','Fondos de Reserva',np.nan),
       ('PLTJEM','Juveniles / obligaciones trabajadores',np.nan),
@@ -676,7 +689,7 @@ with tabs[3]:
     st.subheader("IESS vs Planillas Pagadas")
     st.dataframe(plan_compare,use_container_width=True,hide_index=True)
     st.markdown("#### Valor contable del pago real")
-    st.info("Regla aplicada: si Consolidado IESS y Planillas no coinciden, el registro del PAGO usa el valor efectivamente pagado de las planillas. El asiento de devengo del rol se conserva separado.")
+    st.info("Prioridad aplicada: 1) el Consolidado IESS aporta los valores reales por trabajador (Patronal, Individual y Valor CCC); 2) el Reporte de Planillas verifica lo efectivamente PAGADO; 3) si Consolidado y Planillas difieren, el PAGO contable usa la planilla real y la diferencia queda visible para revisión. No se recalcula CCC sobre el total de materia gravada.")
     st.dataframe(payment_accounting,use_container_width=True,hide_index=True)
     st.markdown("#### Detalle de planillas cargadas")
     st.dataframe(planillas,use_container_width=True,hide_index=True)

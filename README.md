@@ -1,24 +1,15 @@
-# Portal Roles CENASE — lógica contable final
+# Portal Roles CENASE — Conciliación Real v5
 
-## Prioridad de fuentes
-1. IESS es la base principal del devengo y de los cálculos por trabajador.
-2. Rol se usa para horas, Otros Ingresos/Gratificaciones, anticipos, descuentos y modalidad de beneficios.
-3. Planillas pagadas son la fuente del PAGO REAL. Si Consolidado IESS y planillas difieren, el asiento/soporte de pago utiliza el valor efectivamente pagado.
-
-## Tres grupos contables independientes
-- Operativos -> cuentas Vtas.
-- Gerentes -> cuentas Adm., calculados como grupo independiente.
-- Administrativos -> cuentas Adm., calculados como grupo independiente.
-Gerentes y Administrativos nunca se mezclan durante el cálculo aunque compartan códigos de cuenta.
-
-## Beneficios
-- XIII: materia gravada IESS / 12. Valor en rol = pago mensual; celda vacía = acumulación.
-- XIV: SBU 482 / 12 proporcional a días IESS. Valor en rol = pago mensual; celda vacía = acumulación.
-- Fondo de Reserva: materia gravada IESS / 12 cuando ya cumplió un año. Operativos se identifican y concilian separadamente contra planillas FONDOS; Gerentes/Administrativos conservan su propia trazabilidad.
-- Gratificaciones: Otros Ingresos del Rol.
-
-## Conciliación
-- Rol vs IESS por cédula.
-- Consolidado IESS vs planillas pagadas.
-- Pago real IESS: prioridad a planilla pagada cuando exista diferencia.
-- Asiento de ajuste Rol vs IESS separado del asiento principal.
+Corrección principal:
+- NO calcula SECAP/IECE como 1% del total general.
+- Usa la suma de `Valor CCC` que trae el Consolidado IESS, trabajador por trabajador.
+- Aporte individual: suma real de la columna Individual IESS.
+- Aporte patronal: suma real de la columna Patronal IESS.
+- PLANI esperado = Individual + Patronal + Valor CCC del Consolidado.
+- El Reporte de Planillas es la verificación del PAGO REAL.
+- Si Consolidado y Planillas no coinciden, la conciliación muestra la diferencia y el pago contable toma el valor realmente pagado.
+- DIVPRE, FONDOS, PLTJEM y EXTSALCY se mantienen separados.
+- El detalle de planillas conserva número de planilla, fecha de generación, fecha de pago, vencimiento y mes pagado.
+- Operativos, Gerentes y Administrativos continúan separados.
+- Gratificaciones = Otros Ingresos del Rol.
+- El asiento de devengo y el soporte/asiento de pago IESS permanecen separados.
