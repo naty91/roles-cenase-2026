@@ -190,46 +190,133 @@ def build_iess_plan_compare(iess,plan):
     return pd.DataFrame(rows)
 
 def build_accounting(roles,iess,benefits):
-    # Estructura basada en el asiento CENASE suministrado; separa Operativos (Vtas.) y Adm/Gerentes (Adm.).
-    op=roles[roles["Tipo Rol"]=="Operativos"]
-    ad=roles[roles["Tipo Rol"].isin(["Administrativos","Gerentes"])]
+    """Genera el asiento siguiendo la lógica contable CENASE validada con enero 2026.
+
+    Claves:
+    - Sueldo contable = materia gravada IESS del grupo menos sobretiempos del rol.
+    - Patronal = valor patronal del consolidado IESS, no 11.15% recalculado del rol.
+    - XIII/XIV gasto = pagado en rol + acumulado de celdas vacías.
+    - XIII acumulado = remuneración computable / 12 de quienes tienen celda vacía.
+    - XIV acumulado = SBU / 12, proporcional a días, de quienes tienen celda vacía.
+    - FR gasto = pagado mensual + acumulado; el acumulado se estima desde remuneración computable.
+    - El ajuste Rol vs IESS NO se mete en este asiento; se presenta aparte.
+    """
+    rr=roles.copy()
+    ii=iess.copy()
+    # Adjuntar tipo de rol al IESS por cédula.
+    tipo=rr[["Cédula","Tipo Rol"]].drop_duplicates("Cédula")
+    ii=ii.merge(tipo,on="Cédula",how="left")
+    ii["Tipo Rol"]=ii["Tipo Rol"].fillna("Sin Rol")
+
+    op=rr[rr["Tipo Rol"]=="Operativos"].copy()
+    adm=rr[rr["Tipo Rol"]=="Administrativos"].copy()
+    ger=rr[rr["Tipo Rol"]=="Gerentes"].copy()
+    iop=ii[ii["Tipo Rol"]=="Operativos"]
+    iad=ii[ii["Tipo Rol"]=="Administrativos"]
+    iger=ii[ii["Tipo Rol"]=="Gerentes"]
+
     rows=[]
-    def debit(code,name,val): rows.append({"Cuenta":f"{code} {name}","Debe":round(float(val),2),"Haber":0.0})
-    def credit(code,name,val): rows.append({"Cuenta":f"{code} {name}","Debe":0.0,"Haber":round(float(val),2)})
-    # Gastos principales derivados del rol
-    debit("5.2.1.1.1","Sueldos Unificados Vtas.",op["Sueldo"].sum())
-    debit("5.2.1.1.2","Sobretiempos Vtas.",(op["Horas Suplementarias 50%"]+op["Horas Extraordinarias 100%"]+op["Recargo 25%"]).sum())
-    debit("5.2.1.1.3","Gratificaciones Vtas.",op["Otros Ingresos"].sum())
-    debit("5.2.1.1.5","Aportes Patronales al IESS Vtas.",(op["Base"].where(op["Base"].abs()>0.005,op["Sueldo"])*0.1115).sum())
-    debit("5.2.1.1.6","Secap - Iece Vtas.",(op["Base"].where(op["Base"].abs()>0.005,op["Sueldo"])*0.01).sum())
-    debit("5.2.1.1.7","Fondos de Reserva Vtas.",benefits.loc[benefits["Tipo Rol"]=="Operativos","FR Causado 8.33%"].sum())
-    debit("5.2.1.1.8","Décimo Tercer Sueldo Vtas.",op["Décimo Tercero"].sum())
-    debit("5.2.1.1.9","Décimo Cuarto Sueldo Vtas.",op["Décimo Cuarto"].sum())
-    debit("5.2.1.2.1","Sueldos Unificados Adm.",ad["Sueldo"].sum())
-    debit("5.2.1.2.2","Sobretiempos Adm.",(ad["Horas Suplementarias 50%"]+ad["Horas Extraordinarias 100%"]+ad["Recargo 25%"]).sum())
-    debit("5.2.1.2.3","Gratificaciones Adm.",ad["Otros Ingresos"].sum())
-    debit("5.2.1.2.5","Aportes Patronales al IESS Adm.",(ad["Base"].where(ad["Base"].abs()>0.005,ad["Sueldo"])*0.1115).sum())
-    debit("5.2.1.2.6","Secap - Iece Adm.",(ad["Base"].where(ad["Base"].abs()>0.005,ad["Sueldo"])*0.01).sum())
-    debit("5.2.1.2.7","Fondos de Reserva Adm.",benefits.loc[benefits["Tipo Rol"].isin(["Administrativos","Gerentes"]),"FR Causado 8.33%"].sum())
-    debit("5.2.1.2.8","Décimo Tercer Sueldo Adm.",ad["Décimo Tercero"].sum())
-    debit("5.2.1.2.9","Décimo Cuarto Sueldo Adm.",ad["Décimo Cuarto"].sum())
-    # Haber / obligaciones
-    credit("1.1.2.5.11","Anticipos a empleados",roles["Anticipos"].sum())
-    credit("2.1.7.1.1","9.45% Aportes Individuales",iess["Individual IESS"].sum())
-    credit("2.1.7.1.2","Prestamos Quirografarios",roles["Préstamo Quirografario"].sum())
-    credit("2.1.7.6.1","Décimo Tercer Sueldo",roles.loc[roles["_Blank XIII"],"Décimo Tercero"].sum())
-    credit("2.1.7.6.2","Décimo Cuarto Sueldo",roles.loc[roles["_Blank XIV"],"Décimo Cuarto"].sum())
-    credit("2.1.7.6.4","11.15% Aportes Patronales I.E.S.S.",iess["Patronal IESS"].sum())
-    credit("2.1.7.6.5","1% Secap - Iece",iess["Sueldo IESS"].sum()*0.01)
-    credit("2.1.7.6.6","Fondos de Reservas",benefits["FR Acumulado Estimado"].sum())
-    credit("2.1.7.7.1","Sueldos por Pagar",roles["Neto a Recibir"].sum())
-    a=pd.DataFrame(rows)
-    dif=round(a["Debe"].sum()-a["Haber"].sum(),2)
-    if abs(dif)>0.005:
-        if dif>0: credit("2.1.7.7.2","Otros descuentos / cuenta por regularizar",dif)
-        else: debit("5.2.1.2.72","(-) Ajuste Diferencia Rol vs. IESS",-dif)
-        a=pd.DataFrame(rows)
-    return a
+    def debit(code,name,val,source=""):
+        rows.append({"Cuenta":f"{code} {name}","Debe":round(float(val),2),"Haber":0.0,"Fuente":source})
+    def credit(code,name,val,source=""):
+        rows.append({"Cuenta":f"{code} {name}","Debe":0.0,"Haber":round(float(val),2),"Fuente":source})
+    def overtime(d):
+        return float((d["Horas Suplementarias 50%"]+d["Horas Extraordinarias 100%"]+d["Recargo 25%"]).sum())
+    def remuneration(d):
+        return d["Sueldo"]+d["Horas Suplementarias 50%"]+d["Horas Extraordinarias 100%"]+d["Recargo 25%"]+d["Otros Ingresos"]
+    def xiii_acc(d):
+        mask=d["_Blank XIII"]
+        return float((remuneration(d.loc[mask])/12).sum())
+    def xiv_acc(d):
+        mask=d["_Blank XIV"]
+        return float((482.0/12.0*(d.loc[mask,"Días Laborados"]/30.0)).sum())
+    def fr_acc(d):
+        # En la plantilla CENASE: celda FR vacía identifica acumulación.
+        # Se usa 1/12 de la remuneración computable para reproducir el causado mensual.
+        mask=d["_Blank FR"]
+        return float((remuneration(d.loc[mask])/12).sum())
+
+    # Materia gravada IESS por grupo. Sueldos contables = materia gravada - sobretiempos.
+    op_ot=overtime(op); adm_ot=overtime(adm); ger_ot=overtime(ger)
+    op_base=float(iop["Sueldo IESS"].sum()); adm_base=float(iad["Sueldo IESS"].sum()); ger_base=float(iger["Sueldo IESS"].sum())
+
+    # Ventas / operativos
+    debit("5.2.1.1.1","Sueldos Unificados Vtas.",op_base-op_ot,"IESS materia gravada - sobretiempos Rol")
+    debit("5.2.1.1.2","Sobretiempos Vtas.",op_ot,"Rol")
+    debit("5.2.1.1.3","Gratificaciones Vtas.",op["Otros Ingresos"].sum(),"Rol")
+    debit("5.2.1.1.5","Aportes Patronales al IESS Vtas.",iop["Patronal IESS"].sum(),"Consolidado IESS")
+    debit("5.2.1.1.6","Secap - Iece Vtas.",op_base*0.01,"1% materia gravada IESS")
+    debit("5.2.1.1.7","Fondos de Reserva Vtas.",op["Fondo Reserva"].sum()+fr_acc(op),"Pago mensual Rol + acumulado")
+    debit("5.2.1.1.8","Décimo Tercer Sueldo Vtas.",op["Décimo Tercero"].sum()+xiii_acc(op),"Pago mensual Rol + acumulado")
+    debit("5.2.1.1.9","Décimo Cuarto Sueldo Vtas.",op["Décimo Cuarto"].sum()+xiv_acc(op),"Pago mensual Rol + acumulado")
+
+    # Administración: CENASE mantiene Gerentes y Administración en las mismas cuentas,
+    # pero como líneas separadas para trazabilidad, igual que el asiento patrón.
+    for d,di,label in [(ger,iger,"Gerentes"),(adm,iad,"Administración")]:
+        ot=overtime(d); base=float(di["Sueldo IESS"].sum())
+        debit("5.2.1.2.1","Sueldos Unificados Adm.",base-ot,f"IESS {label} - sobretiempos")
+        debit("5.2.1.2.2","Sobretiempos Adm.",ot,f"Rol {label}")
+        debit("5.2.1.2.3","Gratificaciones Adm.",d["Otros Ingresos"].sum(),f"Rol {label}")
+        debit("5.2.1.2.5","Aportes Patronales al IESS Adm.",di["Patronal IESS"].sum(),f"IESS {label}")
+        # SECAP: se presenta calculado y queda sujeto al control contra planilla IESS.
+        debit("5.2.1.2.6","Secap - Iece Adm.",base*0.01,f"1% materia gravada {label}")
+        debit("5.2.1.2.7","Fondos de Reserva Adm.",d["Fondo Reserva"].sum()+fr_acc(d),f"Rol + acumulado {label}")
+        debit("5.2.1.2.8","Décimo Tercer Sueldo Adm.",d["Décimo Tercero"].sum()+xiii_acc(d),f"Rol + acumulado {label}")
+        debit("5.2.1.2.9","Décimo Cuarto Sueldo Adm.",d["Décimo Cuarto"].sum()+xiv_acc(d),f"Rol + acumulado {label}")
+
+    # Acumulados del mes: solo celdas vacías.
+    xiii_total=xiii_acc(op)+xiii_acc(adm)+xiii_acc(ger)
+    xiv_total=xiv_acc(op)+xiv_acc(adm)+xiv_acc(ger)
+    fr_total=fr_acc(op)+fr_acc(adm)+fr_acc(ger)
+
+    credit("1.1.2.5.11","Anticipos a empleados",rr["Anticipos"].sum(),"Rol")
+    credit("2.1.7.1.1","9.45% Aportes Individuales",ii["Individual IESS"].sum(),"Consolidado IESS")
+    # Para préstamos, priorizar consolidado/planilla IESS cuando el archivo lo contenga; si no, rol.
+    credit("2.1.7.1.2","Prestamos Quirografarios",rr["Préstamo Quirografario"].sum(),"Rol - validar contra DIVPRE")
+    credit("2.1.7.6.1","Décimo Tercer Sueldo",xiii_total,"Acumulado por celdas vacías")
+    credit("2.1.7.6.2","Décimo Cuarto Sueldo",xiv_total,"Acumulado por celdas vacías")
+    credit("2.1.7.6.4","11.15% Aportes Patronales I.E.S.S.",ii["Patronal IESS"].sum(),"Consolidado IESS")
+    credit("2.1.7.6.5","1% Secap - Iece",sum(r["Debe"] for r in rows if "Secap - Iece" in r["Cuenta"]),"Suma gasto SECAP")
+    credit("2.1.7.6.6","Fondos de Reservas",fr_total,"Acumulado por celdas vacías")
+
+    # El asiento principal debe cuadrar sin usar la cuenta de ajuste Rol vs IESS.
+    # Sueldos por pagar es el saldo natural luego de reconocer los demás pasivos.
+    a0=pd.DataFrame(rows)
+    debe=float(a0["Debe"].sum()); haber_sin_sueldos=float(a0["Haber"].sum())
+    sueldos_pagar=debe-haber_sin_sueldos
+    credit("2.1.7.7.1","Sueldos por Pagar",sueldos_pagar,"Saldo de cuadre del asiento principal")
+    return pd.DataFrame(rows)
+
+
+def january_benchmark(accounting, roles):
+    """Control patrón enero 2026 entregado por CENASE. No altera el asiento; solo audita."""
+    expected=[
+      ("5.2.1.1.1",102942.02,0),("5.2.1.1.2",7892.46,0),("5.2.1.1.3",716.37,0),
+      ("5.2.1.1.5",12357.52,0),("5.2.1.1.6",1113.61,0),("5.2.1.1.7",9231.32,0),
+      ("5.2.1.1.8",9191.51,0),("5.2.1.1.9",8441.52,0),
+      ("5.2.1.2.1",15604.98,0),("5.2.1.2.1",4698.64,0),
+      ("5.2.1.2.2",908.33,0),("5.2.1.2.2",340.60,0),("5.2.1.2.3",290.88,0),
+      ("5.2.1.2.5",1841.23,0),("5.2.1.2.5",561.88,0),("5.2.1.2.6",165.13,0),("5.2.1.2.6",33.94,0),
+      ("5.2.1.2.7",1209.72,0),("5.2.1.2.7",250.99,0),("5.2.1.2.8",1375.12,0),("5.2.1.2.8",420.82,0),
+      ("5.2.1.2.9",364.18,0),("5.2.1.2.9",240.99,0),
+      ("1.1.2.5.11",0,6810.83),("2.1.7.1.1",0,12510.82),("2.1.7.1.2",0,7642.29),
+      ("2.1.7.6.1",0,1026.84),("2.1.7.6.2",0,241.00),("2.1.7.6.4",0,14760.63),
+      ("2.1.7.6.5",0,1312.68),("2.1.7.6.6",0,1641.13),("2.1.7.7.1",0,133650.63),("2.1.7.7.2",0,596.91)
+    ]
+    # Match repeated accounts in order.
+    calc=accounting.copy(); used=set(); out=[]
+    for code,ed,eh in expected:
+        candidates=calc[calc["Cuenta"].str.startswith(code)]
+        idx=None
+        for i in candidates.index:
+            if i not in used: idx=i; break
+        cd=ch=0.0
+        if idx is not None:
+            used.add(idx); cd=float(calc.loc[idx,"Debe"]); ch=float(calc.loc[idx,"Haber"])
+        out.append({"Cuenta":code,"Debe Patrón":ed,"Debe APP":cd,"Dif. Debe":round(cd-ed,2),
+                    "Haber Patrón":eh,"Haber APP":ch,"Dif. Haber":round(ch-eh,2),
+                    "Estado":"CUADRA" if abs(cd-ed)<=0.05 and abs(ch-eh)<=0.05 else "REVISAR"})
+    return pd.DataFrame(out)
 
 IESS_CANON = ["Periodo","Cédula","Nombre IESS","Rel. Trabajo","Sueldo IESS","Días IESS",
               "Patronal IESS","Individual IESS","Aporte Adic","Cesantía","% CCC","Valor CCC","Total Aporte IESS"]
@@ -541,17 +628,32 @@ with tabs[4]:
 
 with tabs[5]:
     st.subheader("Asiento contable propuesto")
-    st.caption("Estructura basada en el asiento CENASE suministrado. Revísalo antes de importarlo a Contífico.")
+    st.caption("El asiento principal se genera sin usar la cuenta de ajuste Rol vs IESS. Enero 2026 se valida contra el asiento patrón entregado por CENASE.")
     st.dataframe(accounting,use_container_width=True,hide_index=True)
     ac1,ac2,ac3=st.columns(3)
     ac1.metric("Total Debe",fmt_money(accounting["Debe"].sum()))
     ac2.metric("Total Haber",fmt_money(accounting["Haber"].sum()))
     ac3.metric("Diferencia",fmt_money(accounting["Debe"].sum()-accounting["Haber"].sum()))
-    # asiento separado de ajuste entre total IESS usado y neto real del rol
-    total_iess_ref=float(iess["Total Aporte IESS"].sum())
+    st.markdown("#### Auditoría contra asiento patrón de enero 2026")
+    bench=january_benchmark(accounting,roles)
+    st.dataframe(bench,use_container_width=True,hide_index=True)
+    st.metric("Líneas patrón que cuadran",f"{int((bench['Estado']=='CUADRA').sum())} / {len(bench)}")
+
+    st.markdown("#### Asiento separado de ajuste Rol vs IESS")
     neto=float(roles["Neto a Recibir"].sum())
-    st.markdown("#### Control y asiento de ajuste Rol vs IESS")
-    st.info("El asiento de ajuste se presenta separado para que Sueldos por Pagar quede conciliado con el neto real del rol cuando corresponda.")
+    # Para enero, el asiento principal patrón dejó Sueldos por Pagar en 133,650.63.
+    # En meses siguientes se toma el valor generado por el asiento principal.
+    sp=float(accounting.loc[accounting["Cuenta"].str.startswith("2.1.7.7.1"),"Haber"].sum())
+    ajuste=round(sp-neto,2)
+    if abs(ajuste)<=0.05:
+        st.success("No se requiere asiento de ajuste: Sueldos por Pagar coincide con el neto del rol.")
+    else:
+        aj=pd.DataFrame([
+          {"Cuenta":"2.1.7.7.1 Sueldos por Pagar","Debe":max(ajuste,0),"Haber":max(-ajuste,0)},
+          {"Cuenta":"5.2.1.2.72 (-) Ajuste Diferencia Rol vs. IESS","Debe":max(-ajuste,0),"Haber":max(ajuste,0)}
+        ])
+        st.dataframe(aj,use_container_width=True,hide_index=True)
+        st.caption(f"Glosa: P/R AJUSTE POR DIFERENCIA ENTRE VALORES REGISTRADOS SEGÚN IESS Y ROL DE PAGOS CORRESPONDIENTE AL PERÍODO. Valor: {fmt_money(abs(ajuste))}")
 
 with tabs[6]:
     st.subheader("Consulta detallada de Roles")
