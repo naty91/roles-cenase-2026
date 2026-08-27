@@ -1,28 +1,7 @@
-# Portal de Roles CENASE
+# Portal Roles CENASE - versión final
 
-Aplicación Streamlit para consolidar mensualmente:
-- Rol de Gerentes
-- Rol de Administración
-- Rol de Operativos
+Carga mensual de 5 archivos: Gerentes, Administración, Operativos, Consolidado IESS y Reporte de Planillas Pagadas.
 
-## Funciones
-- Carga independiente de los tres roles.
-- Normalización automática de las diferencias de estructura.
-- KPIs: empleados, ingresos, egresos y neto.
-- Filtros por rol, nombre/cédula, cargo, puesto/cliente, neto y días.
-- Cuadre aritmético.
-- Descarga de un único Excel con hojas:
-  - Resumen
-  - Consolidado
-  - Gerentes
-  - Administrativos
-  - Operativos
+Incluye Rol vs IESS, IESS vs planillas pagadas, beneficios sociales, acumulación/pago mensual, fondo de reserva con control de 1 año, consulta de diferencias y asiento contable propuesto.
 
-## Publicar en Streamlit Community Cloud
-1. Crea un repositorio nuevo en GitHub.
-2. Sube `app.py` y `requirements.txt`.
-3. En Streamlit Community Cloud, crea una app desde ese repositorio.
-4. Selecciona `app.py` como archivo principal.
-5. Deploy.
-
-No es necesario subir los roles al repositorio. Los archivos mensuales se cargan desde la pantalla de la app.
+Para actualizar GitHub reemplace app.py y requirements.txt.

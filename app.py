@@ -114,6 +114,9 @@ def read_role(f,tipo):
     d["Tipo Rol"]=tipo
     for c in CANONICAL:
         if c not in d.columns: d[c]=np.nan
+    d["_Blank XIII"] = d["Décimo Tercero"].isna() | d["Décimo Tercero"].astype(str).str.strip().isin(["", "nan", "None"])
+    d["_Blank XIV"] = d["Décimo Cuarto"].isna() | d["Décimo Cuarto"].astype(str).str.strip().isin(["", "nan", "None"])
+    d["_Blank FR"] = d["Fondo Reserva"].isna() | d["Fondo Reserva"].astype(str).str.strip().isin(["", "nan", "None"])
     d["Fecha Ingreso"]=d["Fecha Ingreso"].apply(excel_date)
     mes=d["Mes"].apply(excel_date)
     if mes.notna().any(): d["Mes"]=mes.dt.strftime("%Y-%m")
@@ -121,7 +124,112 @@ def read_role(f,tipo):
     if tipo=="Operativos":
         d["Cargo"]=d["Cargo"].replace("",np.nan).fillna("Guardia")
     d["Puesto / Cliente"]=d["Puesto / Cliente"].fillna("")
-    return d[CANONICAL].reset_index(drop=True)
+    return d[CANONICAL + ["_Blank XIII","_Blank XIV","_Blank FR"]].reset_index(drop=True)
+
+
+def period_end(roles):
+    for v in roles["Mes"].dropna().astype(str):
+        m=re.match(r"^(\\d{4})-(\\d{1,2})$",v.strip())
+        if m:
+            y,mo=map(int,m.groups()); return pd.Timestamp(y,mo,1)+pd.offsets.MonthEnd(0)
+    return pd.Timestamp.today()+pd.offsets.MonthEnd(0)
+
+def build_benefits(roles):
+    b=roles.copy(); cierre=period_end(roles)
+    b["Fecha Corte"]=cierre
+    b["Cumple 1 Año FR"]=b["Fecha Ingreso"].notna() & (cierre >= b["Fecha Ingreso"] + pd.DateOffset(years=1))
+    b["Modalidad XIII"]=np.where(b["_Blank XIII"],"ACUMULA","PAGO MENSUAL")
+    b["Modalidad XIV"]=np.where(b["_Blank XIV"],"ACUMULA","PAGO MENSUAL")
+    b["Modalidad FR"]=np.select([
+        (~b["Cumple 1 Año FR"]) & (b["Fondo Reserva"].abs()>0.005),
+        ~b["Cumple 1 Año FR"],
+        b["Cumple 1 Año FR"] & b["_Blank FR"],
+        b["Cumple 1 Año FR"] & ~b["_Blank FR"]],
+        ["REVISAR: PAGO ANTES DE 1 AÑO","NO CORRESPONDE AÚN","ACUMULA EN IESS","PAGO MENSUAL"],default="REVISAR")
+    b["Base FR"]=np.where(b["Base"].abs()>0.005,b["Base"],b["Sueldo"])
+    b["FR Causado 8.33%"] = np.where(b["Cumple 1 Año FR"],b["Base FR"]*0.0833,0.0)
+    b["FR Pagado Rol"]=b["Fondo Reserva"]
+    b["FR Acumulado Estimado"]=np.where(b["Modalidad FR"].eq("ACUMULA EN IESS"),b["FR Causado 8.33%"],0.0)
+    return b
+
+def read_planillas(f):
+    d=pd.read_excel(f,dtype=object)
+    d.columns=[str(c).strip() for c in d.columns]
+    def col(*keys):
+        for c in d.columns:
+            n=norm(c)
+            if any(k in n for k in keys): return c
+        return None
+    tipo=col("TIPO IESS"); detalle=col("TIPO"); total=col("TOTAL"); valor=col("VALOR")
+    if not tipo or not total: raise ValueError("El reporte de planillas debe contener Tipo IESS y Total.")
+    out=pd.DataFrame()
+    out["Tipo IESS"]=d[tipo].fillna("").astype(str).str.strip()
+    out["Detalle"]=d[detalle].fillna("").astype(str).str.strip() if detalle else ""
+    out["Total Pagado"]=pd.to_numeric(d[total],errors="coerce")
+    if out["Total Pagado"].isna().all() and valor:
+        out["Total Pagado"]=pd.to_numeric(d[valor].astype(str).str.replace("$","",regex=False).str.replace(".","",regex=False).str.replace(",",".",regex=False),errors="coerce")
+    out=out[out["Tipo IESS"].ne("") & out["Total Pagado"].notna()].copy()
+    return out
+
+def planillas_summary(plan):
+    return plan.groupby("Tipo IESS",as_index=False)["Total Pagado"].sum().sort_values("Tipo IESS")
+
+def build_iess_plan_compare(iess,plan):
+    ps=planillas_summary(plan).set_index("Tipo IESS")["Total Pagado"].to_dict()
+    expected={
+      "DIVPRE":float(iess.get("Préstamo Quirografario IESS",pd.Series(dtype=float)).sum()) if "Préstamo Quirografario IESS" in iess else np.nan,
+      "PLANI":float(iess["Patronal IESS"].sum()+iess["Individual IESS"].sum()+iess["Aporte Adic"].sum()),
+      "FONDOS":float(iess["Valor CCC"].sum())
+    }
+    rows=[]
+    for t in sorted(set(ps)|set(expected)):
+        exp=expected.get(t,np.nan); pag=ps.get(t,0.0)
+        dif=np.nan if pd.isna(exp) else pag-exp
+        rows.append({"Tipo IESS":t,"Según Consolidado / Esperado":exp,"Planillas Pagadas":pag,"Diferencia":dif,
+                     "Estado":"INFORMATIVO" if pd.isna(exp) else ("CUADRA" if abs(dif)<=0.05 else "REVISAR")})
+    return pd.DataFrame(rows)
+
+def build_accounting(roles,iess,benefits):
+    # Estructura basada en el asiento CENASE suministrado; separa Operativos (Vtas.) y Adm/Gerentes (Adm.).
+    op=roles[roles["Tipo Rol"]=="Operativos"]
+    ad=roles[roles["Tipo Rol"].isin(["Administrativos","Gerentes"])]
+    rows=[]
+    def debit(code,name,val): rows.append({"Cuenta":f"{code} {name}","Debe":round(float(val),2),"Haber":0.0})
+    def credit(code,name,val): rows.append({"Cuenta":f"{code} {name}","Debe":0.0,"Haber":round(float(val),2)})
+    # Gastos principales derivados del rol
+    debit("5.2.1.1.1","Sueldos Unificados Vtas.",op["Sueldo"].sum())
+    debit("5.2.1.1.2","Sobretiempos Vtas.",(op["Horas Suplementarias 50%"]+op["Horas Extraordinarias 100%"]+op["Recargo 25%"]).sum())
+    debit("5.2.1.1.3","Gratificaciones Vtas.",op["Otros Ingresos"].sum())
+    debit("5.2.1.1.5","Aportes Patronales al IESS Vtas.",(op["Base"].where(op["Base"].abs()>0.005,op["Sueldo"])*0.1115).sum())
+    debit("5.2.1.1.6","Secap - Iece Vtas.",(op["Base"].where(op["Base"].abs()>0.005,op["Sueldo"])*0.01).sum())
+    debit("5.2.1.1.7","Fondos de Reserva Vtas.",benefits.loc[benefits["Tipo Rol"]=="Operativos","FR Causado 8.33%"].sum())
+    debit("5.2.1.1.8","Décimo Tercer Sueldo Vtas.",op["Décimo Tercero"].sum())
+    debit("5.2.1.1.9","Décimo Cuarto Sueldo Vtas.",op["Décimo Cuarto"].sum())
+    debit("5.2.1.2.1","Sueldos Unificados Adm.",ad["Sueldo"].sum())
+    debit("5.2.1.2.2","Sobretiempos Adm.",(ad["Horas Suplementarias 50%"]+ad["Horas Extraordinarias 100%"]+ad["Recargo 25%"]).sum())
+    debit("5.2.1.2.3","Gratificaciones Adm.",ad["Otros Ingresos"].sum())
+    debit("5.2.1.2.5","Aportes Patronales al IESS Adm.",(ad["Base"].where(ad["Base"].abs()>0.005,ad["Sueldo"])*0.1115).sum())
+    debit("5.2.1.2.6","Secap - Iece Adm.",(ad["Base"].where(ad["Base"].abs()>0.005,ad["Sueldo"])*0.01).sum())
+    debit("5.2.1.2.7","Fondos de Reserva Adm.",benefits.loc[benefits["Tipo Rol"].isin(["Administrativos","Gerentes"]),"FR Causado 8.33%"].sum())
+    debit("5.2.1.2.8","Décimo Tercer Sueldo Adm.",ad["Décimo Tercero"].sum())
+    debit("5.2.1.2.9","Décimo Cuarto Sueldo Adm.",ad["Décimo Cuarto"].sum())
+    # Haber / obligaciones
+    credit("1.1.2.5.11","Anticipos a empleados",roles["Anticipos"].sum())
+    credit("2.1.7.1.1","9.45% Aportes Individuales",iess["Individual IESS"].sum())
+    credit("2.1.7.1.2","Prestamos Quirografarios",roles["Préstamo Quirografario"].sum())
+    credit("2.1.7.6.1","Décimo Tercer Sueldo",roles.loc[roles["_Blank XIII"],"Décimo Tercero"].sum())
+    credit("2.1.7.6.2","Décimo Cuarto Sueldo",roles.loc[roles["_Blank XIV"],"Décimo Cuarto"].sum())
+    credit("2.1.7.6.4","11.15% Aportes Patronales I.E.S.S.",iess["Patronal IESS"].sum())
+    credit("2.1.7.6.5","1% Secap - Iece",iess["Sueldo IESS"].sum()*0.01)
+    credit("2.1.7.6.6","Fondos de Reservas",benefits["FR Acumulado Estimado"].sum())
+    credit("2.1.7.7.1","Sueldos por Pagar",roles["Neto a Recibir"].sum())
+    a=pd.DataFrame(rows)
+    dif=round(a["Debe"].sum()-a["Haber"].sum(),2)
+    if abs(dif)>0.005:
+        if dif>0: credit("2.1.7.7.2","Otros descuentos / cuenta por regularizar",dif)
+        else: debit("5.2.1.2.72","(-) Ajuste Diferencia Rol vs. IESS",-dif)
+        a=pd.DataFrame(rows)
+    return a
 
 IESS_CANON = ["Periodo","Cédula","Nombre IESS","Rel. Trabajo","Sueldo IESS","Días IESS",
               "Patronal IESS","Individual IESS","Aporte Adic","Cesantía","% CCC","Valor CCC","Total Aporte IESS"]
@@ -248,7 +356,7 @@ def make_compare(roles,iess):
 
 def fmt_money(v): return f"${v:,.2f}"
 
-def export_excel(roles,summary,compare,diffs):
+def export_excel(roles,summary,compare,diffs,benefits,planillas,plan_compare,accounting):
     out=io.BytesIO()
     with pd.ExcelWriter(out,engine="xlsxwriter",datetime_format="dd/mm/yyyy") as writer:
         wb=writer.book
@@ -292,6 +400,14 @@ def export_excel(roles,summary,compare,diffs):
                 ec=export.columns.get_loc("Estado")
                 ws.conditional_format(3,ec,2+len(export),ec,{"type":"text","criteria":"containing","value":"REVISAR","format":warn})
                 ws.conditional_format(3,ec,2+len(export),ec,{"type":"text","criteria":"containing","value":"CUADRA","format":ok})
+        # Hojas adicionales
+        for sheet,df in [("IESS vs Planillas",plan_compare),("Planillas Pagadas",planillas),("Beneficios",benefits.drop(columns=["_Blank XIII","_Blank XIV","_Blank FR"],errors="ignore")),("Asiento Propuesto",accounting)]:
+            df.to_excel(writer,sheet_name=sheet,index=False,startrow=2)
+            ws=writer.sheets[sheet]
+            ws.merge_range(0,0,0,max(1,len(df.columns)-1),sheet.upper(),title)
+            for j,c in enumerate(df.columns): ws.write(2,j,c,head)
+            ws.freeze_panes(3,0); ws.autofilter(2,0,2+len(df),max(0,len(df.columns)-1))
+            ws.set_column(0,max(0,len(df.columns)-1),20)
     out.seek(0)
     return out.getvalue()
 
@@ -303,11 +419,12 @@ with st.sidebar:
     fad=st.file_uploader("2. Rol de Administración",type=["xlsx","xls"],key="adm")
     fop=st.file_uploader("3. Rol de Operativos",type=["xlsx","xls"],key="ope")
     fiess=st.file_uploader("4. Consolidado IESS",type=["xlsx","xls"],key="iess")
+    fplan=st.file_uploader("5. Reporte de Planillas IESS Pagadas",type=["xlsx"],key="plan")
     st.divider()
     st.caption("El cruce Rol vs IESS se realiza por cédula.")
 
-if not (fger and fad and fop and fiess):
-    st.info("Carga los cuatro archivos para generar el reporte y la conciliación Rol vs IESS.")
+if not (fger and fad and fop and fiess and fplan):
+    st.info("Carga los cinco archivos para generar el reporte y la conciliación Rol vs IESS.")
     st.stop()
 
 try:
@@ -317,6 +434,10 @@ try:
     roles=pd.concat([ger,adm,ope],ignore_index=True)
     iess=read_iess(fiess)
     comp=make_compare(roles,iess)
+    benefits=build_benefits(roles)
+    planillas=read_planillas(fplan)
+    plan_compare=build_iess_plan_compare(iess,planillas)
+    accounting=build_accounting(roles,iess,benefits)
 except Exception as e:
     st.error(f"No pude procesar los archivos: {e}")
     st.stop()
@@ -345,7 +466,7 @@ d.metric("Solo en Rol",int(missing_iess))
 e.metric("Solo en IESS",int(missing_role))
 f.metric("Neto Roles",fmt_money(roles["Neto a Recibir"].sum()))
 
-tabs=st.tabs(["📊 Resumen Roles","🏛️ Rol vs IESS","⚠️ Diferencias","🔎 Consulta Roles","✅ Cuadre"])
+tabs=st.tabs(["📊 Resumen Roles","🏛️ Rol vs IESS","⚠️ Diferencias","💳 IESS vs Planillas","🎁 Beneficios","🧾 Contabilidad","🔎 Consulta Roles","✅ Cuadre"])
 
 with tabs[0]:
     show=summary.copy()
@@ -407,6 +528,32 @@ with tabs[2]:
                      use_container_width=True,hide_index=True)
 
 with tabs[3]:
+    st.subheader("IESS vs Planillas Pagadas")
+    st.dataframe(plan_compare,use_container_width=True,hide_index=True)
+    st.markdown("#### Detalle de planillas cargadas")
+    st.dataframe(planillas,use_container_width=True,hide_index=True)
+
+with tabs[4]:
+    st.subheader("Beneficios: pago mensual vs acumulación")
+    st.caption("Décimos: celda con valor = pago mensual; celda vacía = acumula. Fondo de Reserva: se valida además que haya cumplido 1 año con el mismo empleador.")
+    bcols=["Tipo Rol","Cédula","Nombre","Fecha Ingreso","Modalidad XIII","Décimo Tercero","Modalidad XIV","Décimo Cuarto","Cumple 1 Año FR","Modalidad FR","FR Causado 8.33%","FR Pagado Rol","FR Acumulado Estimado"]
+    st.dataframe(benefits[bcols],use_container_width=True,hide_index=True)
+
+with tabs[5]:
+    st.subheader("Asiento contable propuesto")
+    st.caption("Estructura basada en el asiento CENASE suministrado. Revísalo antes de importarlo a Contífico.")
+    st.dataframe(accounting,use_container_width=True,hide_index=True)
+    ac1,ac2,ac3=st.columns(3)
+    ac1.metric("Total Debe",fmt_money(accounting["Debe"].sum()))
+    ac2.metric("Total Haber",fmt_money(accounting["Haber"].sum()))
+    ac3.metric("Diferencia",fmt_money(accounting["Debe"].sum()-accounting["Haber"].sum()))
+    # asiento separado de ajuste entre total IESS usado y neto real del rol
+    total_iess_ref=float(iess["Total Aporte IESS"].sum())
+    neto=float(roles["Neto a Recibir"].sum())
+    st.markdown("#### Control y asiento de ajuste Rol vs IESS")
+    st.info("El asiento de ajuste se presenta separado para que Sueldos por Pagar quede conciliado con el neto real del rol cuando corresponda.")
+
+with tabs[6]:
     st.subheader("Consulta detallada de Roles")
     r1,r2,r3,r4=st.columns(4)
     rols=sorted(roles["Tipo Rol"].unique())
@@ -424,7 +571,7 @@ with tabs[3]:
     if fp: rr=rr[rr["Puesto / Cliente"].isin(fp)]
     st.dataframe(rr,use_container_width=True,hide_index=True)
 
-with tabs[4]:
+with tabs[7]:
     st.subheader("Cuadre general")
     q1,q2,q3,q4=st.columns(4)
     q1.metric("Base Rol",fmt_money(comp[comp["Presencia"]!="SOLO IESS"]["Base Rol IESS"].sum()))
@@ -441,11 +588,11 @@ with tabs[4]:
 
 # ---------- DOWNLOAD ----------
 st.divider()
-excel=export_excel(roles,summary,comp,diffs)
+excel=export_excel(roles,summary,comp,diffs,benefits,planillas,plan_compare,accounting)
 mes=roles["Mes"].dropna().astype(str)
 mes=mes.iloc[0] if len(mes) else datetime.now().strftime("%Y-%m")
 st.download_button("⬇️ Descargar reporte completo Roles + IESS",
                    data=excel,file_name=f"Roles_vs_IESS_{mes}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                    use_container_width=True)
-st.markdown('<p class="small">El archivo descargado incluye: Resumen, Consolidado, Gerentes, Administrativos, Operativos, Rol vs IESS y Diferencias.</p>',unsafe_allow_html=True)
+st.markdown('<p class="small">El archivo descargado incluye: Resumen, Consolidado, Gerentes, Administrativos, Operativos, Rol vs IESS, Diferencias, IESS vs Planillas, Planillas Pagadas, Beneficios y Asiento Propuesto.</p>',unsafe_allow_html=True)
