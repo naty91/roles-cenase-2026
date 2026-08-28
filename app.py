@@ -8,6 +8,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, A3, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
 st.set_page_config(page_title="CENASE | Roles vs IESS", page_icon="📊", layout="wide")
 
 st.markdown("""
@@ -23,7 +29,7 @@ div[data-testid="stMetric"]{background:white;border:1px solid #e5eaf0;padding:13
 .small{font-size:.87rem;color:#64748b}
 </style>
 <div class="hero">
-<h1>Reporte Consolidado de Roles + Conciliación IESS · v11.1</h1>
+<h1>Reporte Consolidado de Roles + Conciliación IESS · v12</h1>
 <p>Gerentes · Administración · Operativos · IESS | Consulta, diferencias, cuadre y descarga mensual</p>
 </div>
 """, unsafe_allow_html=True)
@@ -790,6 +796,146 @@ def make_compare(roles,iess):
 
 def fmt_money(v): return f"${v:,.2f}"
 
+
+# ---------- PDF ----------
+PDF_BLUE = colors.HexColor("#0B4F88")
+PDF_BLUE_2 = colors.HexColor("#0D5FA6")
+PDF_DIFF = colors.HexColor("#FFF2CC")
+PDF_GRID = colors.HexColor("#CBD5E1")
+PDF_TEXT = colors.HexColor("#172033")
+
+def _pdf_fmt(v):
+    if pd.isna(v):
+        return ""
+    if isinstance(v, (pd.Timestamp, datetime)):
+        return pd.to_datetime(v).strftime("%d/%m/%Y")
+    if isinstance(v, (np.integer, int)):
+        return f"{int(v):,}"
+    if isinstance(v, (np.floating, float)):
+        return f"{float(v):,.2f}"
+    return str(v)
+
+def _pdf_footer(canvas, doc):
+    canvas.saveState()
+    w, h = doc.pagesize
+    canvas.setStrokeColor(colors.HexColor("#D9E2EC"))
+    canvas.line(12*mm, 10*mm, w-12*mm, 10*mm)
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(colors.HexColor("#64748B"))
+    canvas.drawString(12*mm, 6*mm, "CENASE - Portal Roles vs IESS")
+    canvas.drawRightString(w-12*mm, 6*mm, f"Página {doc.page}")
+    canvas.restoreState()
+
+def _safe_pdf_df(df):
+    if df is None:
+        return pd.DataFrame()
+    x = df.copy()
+    x = x.drop(columns=[c for c in x.columns if str(c).startswith("_")], errors="ignore")
+    for c in x.columns:
+        if pd.api.types.is_datetime64_any_dtype(x[c]):
+            x[c] = pd.to_datetime(x[c], errors="coerce").dt.strftime("%d/%m/%Y")
+    return x
+
+def _pdf_column_chunks(df, key_cols=None, max_cols=9):
+    if df.empty:
+        return [df]
+    key_cols = [c for c in (key_cols or []) if c in df.columns]
+    other = [c for c in df.columns if c not in key_cols]
+    room = max(1, max_cols-len(key_cols))
+    if len(df.columns) <= max_cols:
+        return [df]
+    return [df[key_cols + other[i:i+room]] for i in range(0, len(other), room)]
+
+def _pdf_table_story(df, styles, page_width, repeat_key_cols=None, max_cols=9):
+    df = _safe_pdf_df(df)
+    if df.empty:
+        return [Paragraph("Sin registros para mostrar.", styles["BodySmall"]), Spacer(1, 4*mm)]
+    story = []
+    chunks = _pdf_column_chunks(df, repeat_key_cols, max_cols=max_cols)
+    for ci, chunk in enumerate(chunks, start=1):
+        cols = list(chunk.columns)
+        widths = [page_width/max(1,len(cols))] * len(cols)
+        data = [[Paragraph(f"<b>{str(c)}</b>", styles["CellHead"]) for c in cols]]
+        for _, row in chunk.iterrows():
+            vals=[]
+            for c in cols:
+                txt=_pdf_fmt(row[c]).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                vals.append(Paragraph(txt,styles["Cell"]))
+            data.append(vals)
+        tbl=Table(data,colWidths=widths,repeatRows=1,hAlign="LEFT")
+        cmds=[
+            ("BACKGROUND",(0,0),(-1,0),PDF_BLUE_2),
+            ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("GRID",(0,0),(-1,-1),0.35,PDF_GRID),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F8FAFC")]),
+            ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),
+            ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
+        ]
+        for j,c in enumerate(cols):
+            if "DIF" in norm(c) or "DIFERENCIA" in norm(c):
+                cmds += [("BACKGROUND",(j,1),(j,-1),PDF_DIFF),("FONTNAME",(j,1),(j,-1),"Helvetica-Bold")]
+        tbl.setStyle(TableStyle(cmds))
+        story += [tbl,Spacer(1,3*mm)]
+        if ci < len(chunks):
+            story += [Paragraph(f"Continuación de columnas ({ci+1}/{len(chunks)})",styles["Note"]),Spacer(1,2*mm)]
+    return story
+
+def make_pdf_report(title, sections, subtitle="", page="A3", max_cols=9):
+    out=io.BytesIO()
+    pagesize=landscape(A3 if page=="A3" else A4)
+    doc=SimpleDocTemplate(out,pagesize=pagesize,rightMargin=10*mm,leftMargin=10*mm,topMargin=12*mm,bottomMargin=14*mm,title=title,author="CENASE")
+    base=getSampleStyleSheet()
+    styles={
+        "Brand":ParagraphStyle("Brand",parent=base["Normal"],fontName="Helvetica-Bold",fontSize=10,textColor=PDF_BLUE_2,spaceAfter=1*mm),
+        "Title":ParagraphStyle("PdfTitle",parent=base["Title"],fontName="Helvetica-Bold",fontSize=17,leading=20,textColor=PDF_BLUE,spaceAfter=2*mm),
+        "Sub":ParagraphStyle("PdfSub",parent=base["Normal"],fontSize=8.5,leading=11,textColor=colors.HexColor("#475569"),spaceAfter=5*mm),
+        "Section":ParagraphStyle("PdfSection",parent=base["Heading2"],fontName="Helvetica-Bold",fontSize=11,leading=14,textColor=PDF_BLUE,spaceBefore=3*mm,spaceAfter=2*mm),
+        "CellHead":ParagraphStyle("CellHead",parent=base["Normal"],fontName="Helvetica-Bold",fontSize=6.1,leading=7.2,textColor=colors.white),
+        "Cell":ParagraphStyle("Cell",parent=base["Normal"],fontSize=6.0,leading=7.0,textColor=PDF_TEXT),
+        "BodySmall":ParagraphStyle("BodySmall",parent=base["Normal"],fontSize=8,leading=10),
+        "Note":ParagraphStyle("Note",parent=base["Normal"],fontSize=7,leading=9,textColor=colors.HexColor("#64748B")),
+    }
+    story=[Paragraph("CENASE",styles["Brand"]),Paragraph(title,styles["Title"])]
+    if subtitle:
+        story.append(Paragraph(subtitle,styles["Sub"]))
+    usable=pagesize[0]-20*mm
+    for sec in sections:
+        if sec.get("title"):
+            story.append(Paragraph(sec["title"],styles["Section"]))
+        story.extend(_pdf_table_story(sec.get("df",pd.DataFrame()),styles,usable,sec.get("keys"),sec.get("max_cols",max_cols)))
+    doc.build(story,onFirstPage=_pdf_footer,onLaterPages=_pdf_footer)
+    return out.getvalue()
+
+def make_unified_role_pdf(roles, mes):
+    cols=["Tipo Rol","Cédula","Nombre","Cargo","Puesto / Cliente","Días Laborados","Sueldo","Horas Suplementarias 50%","Horas Extraordinarias 100%","Recargo 25%","Otros Ingresos","Décimo Tercero","Décimo Cuarto","Fondo Reserva","Total Ingresos","IESS","Total Egresos","Neto a Recibir"]
+    cols=[c for c in cols if c in roles.columns]
+    df=roles[cols].copy()
+    order=pd.Categorical(df["Tipo Rol"],categories=["Administrativos","Gerentes","Operativos"],ordered=True)
+    df=df.assign(_orden=order).sort_values(["_orden","Nombre"]).drop(columns="_orden")
+    sections=[]
+    for tipo in ["Administrativos","Gerentes","Operativos"]:
+        g=df[df["Tipo Rol"]==tipo].copy()
+        if g.empty: continue
+        total={c:"" for c in g.columns}
+        total["Tipo Rol"]="TOTAL"; total["Nombre"]=f"TOTAL {tipo.upper()}"
+        for c in g.columns:
+            if c not in ["Tipo Rol","Cédula","Nombre","Cargo","Puesto / Cliente"]:
+                total[c]=pd.to_numeric(g[c],errors="coerce").fillna(0).sum()
+        g=pd.concat([g,pd.DataFrame([total])],ignore_index=True)
+        sections.append({"title":f"Rol {tipo}","df":g,"keys":["Tipo Rol","Cédula","Nombre"],"max_cols":10})
+    return make_pdf_report(f"ROL UNIFICADO - {mes}",sections,subtitle="Gerentes, Administración y Operativos consolidados en un solo documento. Incluye ingresos, descuentos y neto a recibir.",page="A3")
+
+def make_bi_pdf(ds1,ds2,ds3,ds4,ds5,ds6,mes):
+    return make_pdf_report(f"REPORTE BI DE DIFERENCIAS ROL VS IESS - {mes}",[
+        {"title":"1. Sueldo / Materia gravada","df":ds1,"keys":["Tipo"],"max_cols":9},
+        {"title":"2. Días Rol vs IESS","df":ds2,"keys":["Tipo"],"max_cols":8},
+        {"title":"3. Beneficios pagados - Rol vs IESS","df":ds3,"keys":["Tipo"],"max_cols":8},
+        {"title":"4. Aportes - Rol vs IESS","df":ds4,"keys":["Tipo"],"max_cols":8},
+        {"title":"5. Beneficios acumulados - Rol vs IESS","df":ds5,"keys":["Tipo"],"max_cols":8},
+        {"title":"6. Resumen de diferencias","df":ds6,"keys":["Tipo"],"max_cols":8},
+    ],subtitle="Comparación directa Rol -> IESS -> Diferencia por Administrativos, Gerentes y Operativos.",page="A3")
+
 def export_excel(roles,summary,compare,diffs,benefits,planillas,plan_compare,accounting,payment_accounting,sim_iess):
     out=io.BytesIO()
     with pd.ExcelWriter(out,engine="xlsxwriter",datetime_format="dd/mm/yyyy") as writer:
@@ -958,6 +1104,10 @@ d.metric("Solo en Rol",int(missing_iess))
 e.metric("Solo en IESS",int(missing_role))
 f.metric("Neto Roles",fmt_money(roles["Neto a Recibir"].sum()))
 
+# Período para nombres de archivos PDF/Excel
+mes_pdf=roles["Mes"].dropna().astype(str)
+mes_pdf=mes_pdf.iloc[0] if len(mes_pdf) else datetime.now().strftime("%Y-%m")
+
 tabs=st.tabs(["📊 Resumen Roles","🏛️ Rol vs IESS","🧮 Rol Simulado IESS","⚠️ Diferencias","💳 IESS vs Planillas","🎁 Beneficios","🧾 Contabilidad","🔎 Consulta Roles","✅ Cuadre","🚦 Diferencias Simplificado"])
 
 with tabs[0]:
@@ -966,6 +1116,11 @@ with tabs[0]:
     st.dataframe(show,use_container_width=True,hide_index=True)
     st.subheader("Neto por tipo de rol")
     st.bar_chart(grp.set_index("Tipo Rol")[["Neto"]],use_container_width=True)
+    p1,p2=st.columns(2)
+    pdf_resumen=make_pdf_report(f"RESUMEN DE ROLES - {mes_pdf}",[{"title":"Resumen consolidado","df":summary,"keys":["Tipo Rol"],"max_cols":8}],subtitle="Resumen mensual consolidado por tipo de rol.")
+    p1.download_button("📄 Descargar Resumen en PDF",pdf_resumen,file_name=f"Resumen_Roles_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_resumen")
+    pdf_rol_unificado=make_unified_role_pdf(roles,mes_pdf)
+    p2.download_button("📄 Descargar Rol Unificado en PDF",pdf_rol_unificado,file_name=f"Rol_Unificado_CENASE_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_rol_unificado")
 
 with tabs[1]:
     st.subheader("Conciliación individual Rol vs IESS")
@@ -1001,6 +1156,9 @@ with tabs[1]:
             "Días IESS":st.column_config.NumberColumn(format="%.0f"),
             "Diferencia Días":st.column_config.NumberColumn(format="%.0f"),
         })
+
+    pdf_view=make_pdf_report(f"ROL VS IESS - {mes_pdf}",[{"title":"Conciliación individual","df":view[display_cols],"keys":["Tipo Rol","Cédula","Nombre"],"max_cols":9}],subtitle="Detalle filtrado de conciliación individual Rol vs IESS.")
+    st.download_button("📄 Descargar Rol vs IESS en PDF",pdf_view,file_name=f"Rol_vs_IESS_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_rol_iess")
 
 with tabs[2]:
     st.subheader("Rol Simulado con valores reales del IESS")
@@ -1043,6 +1201,12 @@ with tabs[2]:
         Total_Beneficios_Acumulados=("Total Beneficios Acumulados IESS","sum")
     )
     st.dataframe(acum_summary,use_container_width=True,hide_index=True)
+    pdf_sim=make_pdf_report(f"ROL SIMULADO IESS - {mes_pdf}",[
+        {"title":"Detalle Rol Simulado IESS","df":sv[sim_cols],"keys":["Tipo Rol","Cédula","Nombre"],"max_cols":9},
+        {"title":"Resumen por grupo","df":sim_summary,"keys":["Tipo Rol"],"max_cols":9},
+        {"title":"Beneficios pagados vs acumulados","df":acum_summary,"keys":["Tipo Rol"],"max_cols":9},
+    ],subtitle="Nómina comparable usando valores reales del IESS y modalidades del Rol.",page="A3")
+    st.download_button("📄 Descargar Rol Simulado IESS en PDF",pdf_sim,file_name=f"Rol_Simulado_IESS_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_sim_iess")
 
 with tabs[3]:
     st.subheader("Solo registros que requieren revisión")
@@ -1061,6 +1225,10 @@ with tabs[3]:
                             "Diferencia Aporte Patronal","% Individual IESS","% Patronal IESS"]],
                      use_container_width=True,hide_index=True)
 
+    diff_pdf_cols=["Presencia","Tipo Rol","Cédula","Nombre","Días Laborados","Días IESS","Diferencia Días","Base Rol IESS","Sueldo IESS","Diferencia Base","IESS","Individual IESS","Diferencia Aporte Individual","Patronal Esperado Rol 11.15%","Patronal IESS","Diferencia Aporte Patronal","% Individual IESS","% Patronal IESS"]
+    pdf_diffs=make_pdf_report(f"DIFERENCIAS A REVISAR - {mes_pdf}",[{"title":"Registros que requieren revisión","df":diffs[diff_pdf_cols] if not diffs.empty else pd.DataFrame(columns=diff_pdf_cols),"keys":["Tipo Rol","Cédula","Nombre"],"max_cols":9}],subtitle="Detalle de diferencias detectadas entre Rol e IESS.",page="A3")
+    st.download_button("📄 Descargar Diferencias en PDF",pdf_diffs,file_name=f"Diferencias_Rol_IESS_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_diffs")
+
 with tabs[4]:
     st.subheader("IESS vs Planillas Pagadas")
     st.dataframe(plan_compare,use_container_width=True,hide_index=True)
@@ -1069,12 +1237,20 @@ with tabs[4]:
     st.dataframe(payment_accounting,use_container_width=True,hide_index=True)
     st.markdown("#### Detalle de planillas cargadas")
     st.dataframe(planillas,use_container_width=True,hide_index=True)
+    pdf_plan=make_pdf_report(f"IESS VS PLANILLAS PAGADAS - {mes_pdf}",[
+        {"title":"Conciliación IESS vs Planillas","df":plan_compare,"max_cols":9},
+        {"title":"Valor contable del pago real","df":payment_accounting,"max_cols":8},
+        {"title":"Detalle de planillas pagadas","df":planillas,"max_cols":9},
+    ],subtitle="Comparación del consolidado IESS con las obligaciones efectivamente pagadas.",page="A3")
+    st.download_button("📄 Descargar IESS vs Planillas en PDF",pdf_plan,file_name=f"IESS_vs_Planillas_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_planillas")
 
 with tabs[5]:
     st.subheader("Beneficios: pago mensual vs acumulación")
     st.caption("Base principal: materia gravada IESS. Décimos: valor en rol = pago mensual; vacío = acumula. Fondo de Reserva: fórmula IESS/12 después de 1 año, con Operativos separados de Gerentes/Administrativos.")
     bcols=["Tipo Rol","Cédula","Nombre","Fecha Ingreso","Sueldo IESS","Días IESS","XIII Causado","Modalidad XIII","XIII Pagado Rol","XIII Acumulado","XIV Causado","Modalidad XIV","XIV Pagado Rol","XIV Acumulado","Cumple 1 Año FR","Regla FR","Modalidad FR","FR Causado","FR Pagado Rol","FR Acumulado"]
     st.dataframe(benefits[bcols],use_container_width=True,hide_index=True)
+    pdf_ben=make_pdf_report(f"BENEFICIOS - {mes_pdf}",[{"title":"Pago mensual vs acumulación","df":benefits[bcols],"keys":["Tipo Rol","Cédula","Nombre"],"max_cols":9}],subtitle="Décimos y Fondo de Reserva: pagado, acumulado y causación.",page="A3")
+    st.download_button("📄 Descargar Beneficios en PDF",pdf_ben,file_name=f"Beneficios_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_beneficios")
 
 with tabs[6]:
     st.subheader("Asiento contable propuesto")
@@ -1105,6 +1281,16 @@ with tabs[6]:
         st.dataframe(aj,use_container_width=True,hide_index=True)
         st.caption(f"Glosa: P/R AJUSTE POR DIFERENCIA ENTRE VALORES REGISTRADOS SEGÚN IESS Y ROL DE PAGOS CORRESPONDIENTE AL PERÍODO. Valor: {fmt_money(abs(ajuste))}")
 
+    cont_sections=[
+        {"title":"Asiento contable propuesto","df":accounting,"max_cols":8},
+        {"title":"Auditoría contra asiento patrón","df":bench,"max_cols":8},
+        {"title":"Pago IESS real","df":payment_accounting,"max_cols":8},
+    ]
+    if abs(ajuste)>0.05:
+        cont_sections.append({"title":"Asiento separado de ajuste Rol vs IESS","df":aj,"max_cols":8})
+    pdf_cont=make_pdf_report(f"CONTABILIDAD DE NÓMINA - {mes_pdf}",cont_sections,subtitle="Asiento de devengo, auditoría, pago real IESS y ajuste Rol vs IESS.",page="A3")
+    st.download_button("📄 Descargar Contabilidad en PDF",pdf_cont,file_name=f"Contabilidad_Nomina_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_contabilidad")
+
 with tabs[7]:
     st.subheader("Consulta detallada de Roles")
     st.caption("Incluye Materia Gravada Rol Calc, Aporte Patronal 11,15%, Aporte Individual 9,45% y SECAP/IECE 1% como campos de auditoría.")
@@ -1123,6 +1309,8 @@ with tabs[7]:
     if fc: rr=rr[rr["Cargo"].isin(fc)]
     if fp: rr=rr[rr["Puesto / Cliente"].isin(fp)]
     st.dataframe(rr,use_container_width=True,hide_index=True)
+    pdf_rr=make_pdf_report(f"CONSULTA DE ROLES - {mes_pdf}",[{"title":"Detalle filtrado del Rol","df":rr,"keys":["Tipo Rol","Cédula","Nombre"],"max_cols":9}],subtitle="Reporte según los filtros seleccionados en Consulta Roles.",page="A3")
+    st.download_button("📄 Descargar Consulta Roles en PDF",pdf_rr,file_name=f"Consulta_Roles_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_consulta")
 
 with tabs[8]:
     st.subheader("Cuadre general")
@@ -1138,17 +1326,39 @@ with tabs[8]:
     t2.metric("Individual IESS 9,45%",fmt_money(iess["Individual IESS"].sum()))
     t3.metric("Valor CCC",fmt_money(iess["Valor CCC"].sum()))
     t4.metric("Total aporte",fmt_money(iess["Total Aporte IESS"].sum()))
+    cuadre_df=pd.DataFrame([
+        {"Concepto":"Base Rol","Valor":comp[comp["Presencia"]!="SOLO IESS"]["Base Rol IESS"].sum()},
+        {"Concepto":"Base IESS","Valor":iess["Sueldo IESS"].sum()},
+        {"Concepto":"Diferencia Base IESS - Rol","Valor":iess["Sueldo IESS"].sum()-comp[comp["Presencia"]!="SOLO IESS"]["Base Rol IESS"].sum()},
+        {"Concepto":"Aporte Individual Rol","Valor":roles["IESS"].sum()},
+        {"Concepto":"Aporte Individual IESS","Valor":iess["Individual IESS"].sum()},
+        {"Concepto":"Patronal IESS 11.15%","Valor":iess["Patronal IESS"].sum()},
+        {"Concepto":"Valor CCC","Valor":iess["Valor CCC"].sum()},
+        {"Concepto":"Total Aporte IESS","Valor":iess["Total Aporte IESS"].sum()},
+    ])
+    pdf_cuadre=make_pdf_report(f"CUADRE GENERAL - {mes_pdf}",[{"title":"Resumen de cuadre","df":cuadre_df,"max_cols":6}],subtitle="Totales generales Rol e IESS.")
+    st.download_button("📄 Descargar Cuadre en PDF",pdf_cuadre,file_name=f"Cuadre_General_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_cuadre")
 
 # ---------- DOWNLOAD ----------
 st.divider()
 excel=export_excel(roles,summary,comp,diffs,benefits,planillas,plan_compare,accounting,payment_accounting,sim_iess)
 mes=roles["Mes"].dropna().astype(str)
 mes=mes.iloc[0] if len(mes) else datetime.now().strftime("%Y-%m")
-st.download_button("⬇️ Descargar reporte completo Roles + IESS",
+d1,d2=st.columns(2)
+d1.download_button("⬇️ Descargar reporte completo Roles + IESS (Excel)",
                    data=excel,file_name=f"Roles_vs_IESS_{mes}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                    use_container_width=True)
-st.markdown('<p class="small">El archivo descargado incluye además Rol Simulado IESS y los nuevos campos patronales calculados dentro del Rol real.</p>',unsafe_allow_html=True)
+full_pdf=make_pdf_report(f"REPORTE MENSUAL ROLES + IESS - {mes_pdf}",[
+    {"title":"Resumen de Roles","df":summary,"keys":["Tipo Rol"],"max_cols":8},
+    {"title":"Rol vs IESS - diferencias","df":diffs.drop(columns=["_merge"],errors="ignore"),"keys":["Tipo Rol","Cédula","Nombre"],"max_cols":9},
+    {"title":"IESS vs Planillas","df":plan_compare,"max_cols":9},
+    {"title":"Asiento contable propuesto","df":accounting,"max_cols":8},
+],subtitle="Reporte mensual integral de nómina, conciliación IESS, planillas y contabilidad.",page="A3")
+d2.download_button("📄 Descargar reporte mensual completo (PDF)",
+                   data=full_pdf,file_name=f"Reporte_Mensual_Roles_IESS_{mes_pdf}.pdf",
+                   mime="application/pdf",use_container_width=True)
+st.markdown('<p class="small">Ahora cada módulo tiene descarga PDF. También puedes generar el Rol Unificado mensual en un solo PDF desde Resumen Roles.</p>',unsafe_allow_html=True)
 
 with tabs[9]:
     st.subheader("📊 Reporte BI de Diferencias Rol vs IESS")
@@ -1195,4 +1405,6 @@ with tabs[9]:
         hide_index=True
     )
     st.info("En acumulados, el lado Rol y el lado IESS se calculan de forma independiente. Por eso una diferencia $0,00 significa que realmente cuadran, no que se está comparando IESS contra sí mismo.")
+    pdf_bi=make_bi_pdf(ds1,ds2,ds3,ds4,ds5,ds6,mes_pdf)
+    st.download_button("📄 Descargar Reporte BI en PDF",pdf_bi,file_name=f"Reporte_BI_Diferencias_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_bi")
 
