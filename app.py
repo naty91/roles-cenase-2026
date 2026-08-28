@@ -1156,15 +1156,15 @@ def make_unified_role_pdf(roles, mes, benefits=None):
     out=io.BytesIO()
     pagesize=landscape(A3)
     doc=SimpleDocTemplate(
-        out,pagesize=pagesize,rightMargin=8*mm,leftMargin=8*mm,
-        topMargin=8*mm,bottomMargin=12*mm,title=f"ROL DE PAGOS {mes}",author="CENASE"
+        out,pagesize=pagesize,rightMargin=5*mm,leftMargin=5*mm,
+        topMargin=6*mm,bottomMargin=10*mm,title=f"ROL DE PAGOS {mes}",author="CENASE"
     )
     base=getSampleStyleSheet()
     title=ParagraphStyle("PivotRoleTitle",parent=base["Title"],fontName="Helvetica-Bold",fontSize=15,leading=18,alignment=1,textColor=PDF_BLUE)
     sub=ParagraphStyle("PivotRoleSub",parent=base["Normal"],fontName="Helvetica-Bold",fontSize=8.5,leading=10,alignment=1,textColor=PDF_TEXT)
-    head=ParagraphStyle("PivotRoleHead",parent=base["Normal"],fontName="Helvetica-Bold",fontSize=6.5,leading=7.2,alignment=1,textColor=PDF_TEXT)
+    head=ParagraphStyle("PivotRoleHead",parent=base["Normal"],fontName="Helvetica-Bold",fontSize=8.2,leading=9.2,alignment=1,textColor=PDF_TEXT)
     head_white=ParagraphStyle("PivotRoleHeadWhite",parent=head,textColor=colors.white)
-    cell=ParagraphStyle("PivotRoleCell",parent=base["Normal"],fontSize=7.1,leading=8.2,textColor=PDF_TEXT)
+    cell=ParagraphStyle("PivotRoleCell",parent=base["Normal"],fontSize=9.0,leading=10.2,textColor=PDF_TEXT)
     money=ParagraphStyle("PivotRoleMoney",parent=cell,alignment=2)
     total=ParagraphStyle("PivotRoleTotal",parent=cell,fontName="Helvetica-Bold")
     total_money=ParagraphStyle("PivotRoleTotalMoney",parent=money,fontName="Helvetica-Bold")
@@ -1233,9 +1233,9 @@ def make_unified_role_pdf(roles, mes, benefits=None):
         tbl.setStyle(TableStyle(cmds))
         return tbl
 
-    usable=pagesize[0]-16*mm
+    usable=pagesize[0]-10*mm
     # Dos bloques anchos, iguales al Excel: etiqueta + 10 columnas de valores.
-    w0=32*mm
+    w0=29*mm
     rest=(usable-w0)/10
     wide_widths=[w0]+[rest]*10
     story.append(table_block(ing,colors.HexColor("#D9E4F0"),PDF_TEXT,wide_widths))
@@ -1244,7 +1244,7 @@ def make_unified_role_pdf(roles, mes, benefits=None):
     story.append(Spacer(1,2.5*mm))
 
     # Beneficios pagados y acumulados, como en la parte inferior del Excel.
-    small_widths=[34*mm,38*mm,38*mm,38*mm]
+    small_widths=[42*mm,48*mm,48*mm,48*mm]
     story.append(table_block(pag,colors.HexColor("#D9E4F0"),PDF_TEXT,small_widths,compact=True))
     story.append(Spacer(1,1.8*mm))
     story.append(table_block(acc,colors.HexColor("#A43A37"),colors.white,small_widths,compact=True))

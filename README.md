@@ -55,3 +55,9 @@ No subas esas credenciales a GitHub. Streamlit Secrets las mantiene fuera del re
 - Bloque 3: XIII, XIV y Fondo de Reserva pagados en el Rol.
 - Bloque 4: XIII, XIV y Fondo de Reserva acumulados.
 - Los cuatro bloques se presentan en una sola pagina A3 horizontal para conservar la letra legible y todas las columnas visibles.
+
+## v18 - Rol PDF horizontal de mayor legibilidad
+- Rol resumen en A3 horizontal.
+- Tipografía de tablas aumentada.
+- Márgenes reducidos para aprovechar el ancho completo.
+- Mantiene Ingresos, Egresos, Beneficios pagados y Beneficios acumulados en una sola hoja horizontal cuando el contenido lo permite.
