@@ -23,7 +23,7 @@ div[data-testid="stMetric"]{background:white;border:1px solid #e5eaf0;padding:13
 .small{font-size:.87rem;color:#64748b}
 </style>
 <div class="hero">
-<h1>Reporte Consolidado de Roles + Conciliación IESS · v7</h1>
+<h1>Reporte Consolidado de Roles + Conciliación IESS · v8</h1>
 <p>Gerentes · Administración · Operativos · IESS | Consulta, diferencias, cuadre y descarga mensual</p>
 </div>
 """, unsafe_allow_html=True)
@@ -448,6 +448,56 @@ def january_benchmark(accounting, roles):
                     "Estado":"CUADRA" if abs(cd-ed)<=0.05 and abs(ch-eh)<=0.05 else "REVISAR"})
     return pd.DataFrame(out)
 
+
+def add_role_employer_calcs(roles):
+    r = roles.copy()
+    r["Materia Gravada Rol Calc"] = (r["Sueldo"] + r["Horas Suplementarias 50%"] + r["Horas Extraordinarias 100%"] + r["Recargo 25%"] + r["Otros Ingresos"])
+    r["Aporte Individual Rol Calc 9.45%"] = r["Materia Gravada Rol Calc"] * 0.0945
+    r["Aporte Patronal Rol Calc 11.15%"] = r["Materia Gravada Rol Calc"] * 0.1115
+    r["SECAP-IECE Rol Calc 1%"] = r["Materia Gravada Rol Calc"] * 0.01
+    return r
+
+def build_iess_simulated_role(roles, iess):
+    ig = iess.groupby("Cédula", as_index=False).agg({
+        "Nombre IESS":"first","Rel. Trabajo":"first","Sueldo IESS":"sum","Días IESS":"sum",
+        "Patronal IESS":"sum","Individual IESS":"sum","Aporte Adic":"sum","Cesantía":"sum",
+        "Valor CCC":"sum","Total Aporte IESS":"sum"
+    })
+    s = roles.merge(ig, on="Cédula", how="left")
+    for c in ["Sueldo IESS","Días IESS","Patronal IESS","Individual IESS","Aporte Adic","Cesantía","Valor CCC","Total Aporte IESS"]:
+        s[c] = pd.to_numeric(s[c], errors="coerce").fillna(0.0)
+    s["Sobretiempos Rol"] = s["Horas Suplementarias 50%"] + s["Horas Extraordinarias 100%"] + s["Recargo 25%"]
+    s["Otros Ingresos Gravados Rol"] = s["Otros Ingresos"]
+    s["Sueldo Base Simulado IESS"] = (s["Sueldo IESS"] - s["Sobretiempos Rol"] - s["Otros Ingresos Gravados Rol"]).clip(lower=0)
+    s["XIII Simulado IESS"] = s["Sueldo IESS"] / 12.0
+    s["XIV Simulado IESS"] = (482.0 / 12.0) * (s["Días IESS"].clip(lower=0, upper=30) / 30.0)
+    cierre = period_end(roles)
+    cumple_ano = s["Fecha Ingreso"].notna() & (cierre >= s["Fecha Ingreso"] + pd.DateOffset(years=1))
+    s["FR Simulado IESS"] = np.where(s["Tipo Rol"].eq("Operativos"), s["Sueldo IESS"] * 0.0833, np.where(cumple_ano, s["Sueldo IESS"] * 0.0833, 0.0))
+    s["XIII Pagado Simulado"] = np.where(s["_Blank XIII"], 0.0, s["XIII Simulado IESS"])
+    s["XIII Acumulado Simulado"] = np.where(s["_Blank XIII"], s["XIII Simulado IESS"], 0.0)
+    s["XIV Pagado Simulado"] = np.where(s["_Blank XIV"], 0.0, s["XIV Simulado IESS"])
+    s["XIV Acumulado Simulado"] = np.where(s["_Blank XIV"], s["XIV Simulado IESS"], 0.0)
+    fr_acumula = np.where(s["Tipo Rol"].eq("Operativos"), s["_Blank FR"], s["_Blank FR"] & cumple_ano)
+    s["FR Pagado Simulado"] = np.where(fr_acumula, 0.0, s["FR Simulado IESS"])
+    s["FR Acumulado Simulado"] = np.where(fr_acumula, s["FR Simulado IESS"], 0.0)
+    s["Total Ingresos Simulado IESS"] = s["Sueldo IESS"] + s["XIII Pagado Simulado"] + s["XIV Pagado Simulado"] + s["FR Pagado Simulado"] + s["Movilización"]
+    s["Total Egresos Simulado IESS"] = s["Individual IESS"] + s["Préstamo Quirografario"] + s["Préstamo Hipotecario"] + s["Anticipos"] + s["Faltas / Pérdida Remuneración"] + s["Otros Egresos"] + s["Multa"] + s["Impuesto Renta"]
+    s["Neto Simulado IESS"] = s["Total Ingresos Simulado IESS"] - s["Total Egresos Simulado IESS"]
+    s["Dif. Días Rol vs IESS"] = s["Días Laborados"] - s["Días IESS"]
+    s["Dif. Materia Gravada Rol vs IESS"] = s["Materia Gravada Rol Calc"] - s["Sueldo IESS"]
+    s["Dif. Individual Rol vs IESS"] = s["IESS"] - s["Individual IESS"]
+    s["Dif. Patronal Calc Rol vs IESS"] = s["Aporte Patronal Rol Calc 11.15%"] - s["Patronal IESS"]
+    s["Dif. SECAP Calc Rol vs IESS"] = s["SECAP-IECE Rol Calc 1%"] - s["Valor CCC"]
+    s["Dif. XIII Rol vs Sim IESS"] = s["Décimo Tercero"] - s["XIII Pagado Simulado"]
+    s["Dif. XIV Rol vs Sim IESS"] = s["Décimo Cuarto"] - s["XIV Pagado Simulado"]
+    s["Dif. FR Rol vs Sim IESS"] = s["Fondo Reserva"] - s["FR Pagado Simulado"]
+    s["Dif. Total Ingresos Rol vs Sim IESS"] = s["Total Ingresos"] - s["Total Ingresos Simulado IESS"]
+    s["Dif. Total Egresos Rol vs Sim IESS"] = s["Total Egresos"] - s["Total Egresos Simulado IESS"]
+    s["Dif. Neto Rol vs Sim IESS"] = s["Neto a Recibir"] - s["Neto Simulado IESS"]
+    s["Estado Simulación"] = np.select([s["Sueldo IESS"].eq(0), s["Dif. Neto Rol vs Sim IESS"].abs() <= 0.05],["SIN IESS / REVISAR","CUADRA"],default="DIFERENCIA")
+    return s
+
 IESS_CANON = ["Periodo","Cédula","Nombre IESS","Rel. Trabajo","Sueldo IESS","Días IESS",
               "Patronal IESS","Individual IESS","Aporte Adic","Cesantía","% CCC","Valor CCC","Total Aporte IESS"]
 
@@ -573,7 +623,7 @@ def make_compare(roles,iess):
 
 def fmt_money(v): return f"${v:,.2f}"
 
-def export_excel(roles,summary,compare,diffs,benefits,planillas,plan_compare,accounting,payment_accounting):
+def export_excel(roles,summary,compare,diffs,benefits,planillas,plan_compare,accounting,payment_accounting,sim_iess):
     out=io.BytesIO()
     with pd.ExcelWriter(out,engine="xlsxwriter",datetime_format="dd/mm/yyyy") as writer:
         wb=writer.book
@@ -617,6 +667,14 @@ def export_excel(roles,summary,compare,diffs,benefits,planillas,plan_compare,acc
                 ec=export.columns.get_loc("Estado")
                 ws.conditional_format(3,ec,2+len(export),ec,{"type":"text","criteria":"containing","value":"REVISAR","format":warn})
                 ws.conditional_format(3,ec,2+len(export),ec,{"type":"text","criteria":"containing","value":"CUADRA","format":ok})
+        sim_export=sim_iess.copy()
+        sim_export.to_excel(writer,sheet_name="Rol Simulado IESS",index=False,startrow=2)
+        ws=writer.sheets["Rol Simulado IESS"]
+        ws.merge_range(0,0,0,max(1,len(sim_export.columns)-1),"ROL SIMULADO CON VALORES IESS",title)
+        for j,c in enumerate(sim_export.columns): ws.write(2,j,c,head)
+        ws.freeze_panes(3,0); ws.autofilter(2,0,2+len(sim_export),max(0,len(sim_export.columns)-1))
+        ws.set_column(0,max(0,len(sim_export.columns)-1),18)
+
         # Hojas adicionales
         for sheet,df in [("IESS vs Planillas",plan_compare),("Planillas Pagadas",planillas),("Beneficios",benefits.drop(columns=["_Blank XIII","_Blank XIV","_Blank FR"],errors="ignore")),("Asiento Propuesto",accounting),("Pago IESS Real",payment_accounting)]:
             df.to_excel(writer,sheet_name=sheet,index=False,startrow=2)
@@ -649,12 +707,14 @@ try:
     adm=read_role(fad,"Administrativos")
     ope=read_role(fop,"Operativos")
     roles=pd.concat([ger,adm,ope],ignore_index=True)
+    roles=add_role_employer_calcs(roles)
     dup_mask = roles.duplicated(subset=["Tipo Rol","Mes","Cédula"], keep=False)
     if dup_mask.any():
         st.warning(f"Se detectaron {int(dup_mask.sum())} filas duplicadas. Se conservará una sola fila por trabajador.")
         roles = roles.drop_duplicates(subset=["Tipo Rol","Mes","Cédula"], keep="first").reset_index(drop=True)
     iess=read_iess(fiess)
     comp=make_compare(roles,iess)
+    sim_iess=build_iess_simulated_role(roles,iess)
     benefits=build_benefits(roles,iess)
     planillas=read_planillas(fplan)
     plan_compare=build_iess_plan_compare(iess,planillas)
@@ -688,7 +748,7 @@ d.metric("Solo en Rol",int(missing_iess))
 e.metric("Solo en IESS",int(missing_role))
 f.metric("Neto Roles",fmt_money(roles["Neto a Recibir"].sum()))
 
-tabs=st.tabs(["📊 Resumen Roles","🏛️ Rol vs IESS","⚠️ Diferencias","💳 IESS vs Planillas","🎁 Beneficios","🧾 Contabilidad","🔎 Consulta Roles","✅ Cuadre"])
+tabs=st.tabs(["📊 Resumen Roles","🏛️ Rol vs IESS","🧮 Rol Simulado IESS","⚠️ Diferencias","💳 IESS vs Planillas","🎁 Beneficios","🧾 Contabilidad","🔎 Consulta Roles","✅ Cuadre"])
 
 with tabs[0]:
     show=summary.copy()
@@ -733,6 +793,30 @@ with tabs[1]:
         })
 
 with tabs[2]:
+    st.subheader("Rol Simulado con valores reales del IESS")
+    st.caption("Reconstruye una nómina comparable usando materia gravada, días, aporte individual, patronal y CCC reales del IESS. Mantiene del Rol los descuentos y la modalidad mensual/acumulada de beneficios.")
+    s1,s2,s3,s4=st.columns(4)
+    sim_roles=sorted(sim_iess["Tipo Rol"].dropna().astype(str).unique())
+    sim_filter=s1.multiselect("Tipo de rol",sim_roles,default=sim_roles,key="sim_role")
+    sim_states=sorted(sim_iess["Estado Simulación"].dropna().astype(str).unique())
+    sim_state=s2.multiselect("Estado",sim_states,default=sim_states,key="sim_state")
+    sim_q=s3.text_input("Nombre / cédula",key="sim_q")
+    only_diff=s4.checkbox("Solo diferencias",value=False,key="sim_only_diff")
+    sv=sim_iess[sim_iess["Tipo Rol"].isin(sim_filter)&sim_iess["Estado Simulación"].isin(sim_state)].copy()
+    if sim_q.strip():
+        nq=norm(sim_q)
+        sv=sv[sv["Nombre"].map(norm).str.contains(nq,na=False)|sv["Cédula"].astype(str).str.contains(sim_q.strip(),na=False)]
+    if only_diff:
+        sv=sv[sv["Dif. Neto Rol vs Sim IESS"].abs()>0.05]
+    k1,k2,k3,k4=st.columns(4)
+    k1.metric("Trabajadores",len(sv)); k2.metric("Neto Rol",fmt_money(sv["Neto a Recibir"].sum())); k3.metric("Neto Simulado IESS",fmt_money(sv["Neto Simulado IESS"].sum())); k4.metric("Diferencia Neto",fmt_money(sv["Dif. Neto Rol vs Sim IESS"].sum()))
+    sim_cols=["Estado Simulación","Tipo Rol","Cédula","Nombre","Cargo","Puesto / Cliente","Días Laborados","Días IESS","Dif. Días Rol vs IESS","Materia Gravada Rol Calc","Sueldo IESS","Dif. Materia Gravada Rol vs IESS","Sueldo Base Simulado IESS","Sobretiempos Rol","Otros Ingresos Gravados Rol","Décimo Tercero","XIII Simulado IESS","XIII Pagado Simulado","XIII Acumulado Simulado","Dif. XIII Rol vs Sim IESS","Décimo Cuarto","XIV Simulado IESS","XIV Pagado Simulado","XIV Acumulado Simulado","Dif. XIV Rol vs Sim IESS","Fondo Reserva","FR Simulado IESS","FR Pagado Simulado","FR Acumulado Simulado","Dif. FR Rol vs Sim IESS","IESS","Individual IESS","Dif. Individual Rol vs IESS","Aporte Patronal Rol Calc 11.15%","Patronal IESS","Dif. Patronal Calc Rol vs IESS","SECAP-IECE Rol Calc 1%","Valor CCC","Dif. SECAP Calc Rol vs IESS","Total Ingresos","Total Ingresos Simulado IESS","Dif. Total Ingresos Rol vs Sim IESS","Total Egresos","Total Egresos Simulado IESS","Dif. Total Egresos Rol vs Sim IESS","Neto a Recibir","Neto Simulado IESS","Dif. Neto Rol vs Sim IESS"]
+    st.dataframe(sv[sim_cols],use_container_width=True,hide_index=True)
+    st.markdown("#### Resumen por grupo")
+    sim_summary=sv.groupby("Tipo Rol",as_index=False).agg(Trabajadores=("Cédula","count"),Materia_Gravada_Rol=("Materia Gravada Rol Calc","sum"),Materia_Gravada_IESS=("Sueldo IESS","sum"),Patronal_Rol_Calc=("Aporte Patronal Rol Calc 11.15%","sum"),Patronal_IESS=("Patronal IESS","sum"),SECAP_Rol_Calc=("SECAP-IECE Rol Calc 1%","sum"),CCC_IESS=("Valor CCC","sum"),Neto_Rol=("Neto a Recibir","sum"),Neto_Simulado_IESS=("Neto Simulado IESS","sum"),Diferencia_Neto=("Dif. Neto Rol vs Sim IESS","sum"))
+    st.dataframe(sim_summary,use_container_width=True,hide_index=True)
+
+with tabs[3]:
     st.subheader("Solo registros que requieren revisión")
     x1,x2,x3,x4=st.columns(4)
     x1.metric("Registros a revisar",len(diffs))
@@ -749,7 +833,7 @@ with tabs[2]:
                             "Diferencia Aporte Patronal","% Individual IESS","% Patronal IESS"]],
                      use_container_width=True,hide_index=True)
 
-with tabs[3]:
+with tabs[4]:
     st.subheader("IESS vs Planillas Pagadas")
     st.dataframe(plan_compare,use_container_width=True,hide_index=True)
     st.markdown("#### Valor contable del pago real")
@@ -758,13 +842,13 @@ with tabs[3]:
     st.markdown("#### Detalle de planillas cargadas")
     st.dataframe(planillas,use_container_width=True,hide_index=True)
 
-with tabs[4]:
+with tabs[5]:
     st.subheader("Beneficios: pago mensual vs acumulación")
     st.caption("Base principal: materia gravada IESS. Décimos: valor en rol = pago mensual; vacío = acumula. Fondo de Reserva: fórmula IESS/12 después de 1 año, con Operativos separados de Gerentes/Administrativos.")
     bcols=["Tipo Rol","Cédula","Nombre","Fecha Ingreso","Sueldo IESS","Días IESS","XIII Causado","Modalidad XIII","XIII Pagado Rol","XIII Acumulado","XIV Causado","Modalidad XIV","XIV Pagado Rol","XIV Acumulado","Cumple 1 Año FR","Regla FR","Modalidad FR","FR Causado","FR Pagado Rol","FR Acumulado"]
     st.dataframe(benefits[bcols],use_container_width=True,hide_index=True)
 
-with tabs[5]:
+with tabs[6]:
     st.subheader("Asiento contable propuesto")
     st.caption("Asiento de devengo: IESS es la base principal por trabajador y por los 3 grupos. Gratificaciones = Otros Ingresos del rol. Los pagos reales de IESS se concilian aparte contra las planillas pagadas.")
     st.dataframe(accounting,use_container_width=True,hide_index=True)
@@ -793,8 +877,9 @@ with tabs[5]:
         st.dataframe(aj,use_container_width=True,hide_index=True)
         st.caption(f"Glosa: P/R AJUSTE POR DIFERENCIA ENTRE VALORES REGISTRADOS SEGÚN IESS Y ROL DE PAGOS CORRESPONDIENTE AL PERÍODO. Valor: {fmt_money(abs(ajuste))}")
 
-with tabs[6]:
+with tabs[7]:
     st.subheader("Consulta detallada de Roles")
+    st.caption("Incluye Materia Gravada Rol Calc, Aporte Patronal 11,15%, Aporte Individual 9,45% y SECAP/IECE 1% como campos de auditoría.")
     r1,r2,r3,r4=st.columns(4)
     rols=sorted(roles["Tipo Rol"].unique())
     fr=r1.multiselect("Tipo de rol",rols,default=rols,key="fr")
@@ -811,7 +896,7 @@ with tabs[6]:
     if fp: rr=rr[rr["Puesto / Cliente"].isin(fp)]
     st.dataframe(rr,use_container_width=True,hide_index=True)
 
-with tabs[7]:
+with tabs[8]:
     st.subheader("Cuadre general")
     q1,q2,q3,q4=st.columns(4)
     q1.metric("Base Rol",fmt_money(comp[comp["Presencia"]!="SOLO IESS"]["Base Rol IESS"].sum()))
@@ -828,11 +913,11 @@ with tabs[7]:
 
 # ---------- DOWNLOAD ----------
 st.divider()
-excel=export_excel(roles,summary,comp,diffs,benefits,planillas,plan_compare,accounting,payment_accounting)
+excel=export_excel(roles,summary,comp,diffs,benefits,planillas,plan_compare,accounting,payment_accounting,sim_iess)
 mes=roles["Mes"].dropna().astype(str)
 mes=mes.iloc[0] if len(mes) else datetime.now().strftime("%Y-%m")
 st.download_button("⬇️ Descargar reporte completo Roles + IESS",
                    data=excel,file_name=f"Roles_vs_IESS_{mes}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                    use_container_width=True)
-st.markdown('<p class="small">El archivo descargado incluye: Resumen, Consolidado, Gerentes, Administrativos, Operativos, Rol vs IESS, Diferencias, IESS vs Planillas, Planillas Pagadas, Beneficios, Asiento Propuesto y Pago IESS Real.</p>',unsafe_allow_html=True)
+st.markdown('<p class="small">El archivo descargado incluye además Rol Simulado IESS y los nuevos campos patronales calculados dentro del Rol real.</p>',unsafe_allow_html=True)

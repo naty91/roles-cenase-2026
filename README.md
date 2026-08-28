@@ -1,6 +1,10 @@
-# Portal Roles CENASE — v7 Sin duplicados
+# Portal Roles CENASE — v8 Simulador IESS
 
-- Lee exclusivamente la hoja LISTA de cada rol.
-- Excluye la hoja IMPORT del consolidado.
-- Elimina duplicados por Tipo Rol + Mes + Cédula.
-- Conserva la lógica de IESS, planillas, beneficios y contabilidad de la v6.
+Novedades:
+- Rol real agrega Materia Gravada calculada, Individual 9,45%, Patronal 11,15% y SECAP/IECE 1%.
+- Nuevo Rol Simulado IESS por trabajador.
+- El simulador usa materia gravada, días, Individual, Patronal y Valor CCC reales del IESS.
+- Conserva del rol horas/recargo para desglose, otros ingresos, anticipos, préstamos, otros descuentos y modalidad mensual/acumulada.
+- Recalcula XIII, XIV y Fondo de Reserva según el grupo.
+- Calcula Total Ingresos, Total Egresos, Neto Simulado IESS y diferencias contra el rol real.
+- Exporta una hoja adicional `Rol Simulado IESS`.
