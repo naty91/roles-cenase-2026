@@ -23,8 +23,8 @@ div[data-testid="stMetric"]{background:white;border:1px solid #e5eaf0;padding:13
 .small{font-size:.87rem;color:#64748b}
 </style>
 <div class="hero">
-<h1>Reporte Consolidado de Roles + Conciliación IESS</h1>
-<p>Gerentes · Administración · Operativos completos · IESS | Lectura integral, conciliación, beneficios y asiento</p>
+<h1>Reporte Consolidado de Roles + Conciliación IESS · v7</h1>
+<p>Gerentes · Administración · Operativos · IESS | Consulta, diferencias, cuadre y descarga mensual</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -34,6 +34,18 @@ def norm(x):
     s = str(x).strip()
     s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
     return re.sub(r"\s+"," ",s).upper()
+
+
+def normalize_ci(v):
+    """Normaliza cédulas que Excel puede convertir a número y perder el cero inicial."""
+    if pd.isna(v):
+        return ""
+    s=str(v).strip()
+    s=re.sub(r"\.0$","",s)
+    s=re.sub(r"\D","",s)
+    if 1 <= len(s) < 10:
+        s=s.zfill(10)
+    return s
 
 def as_num(s):
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
@@ -77,110 +89,74 @@ ALIASES = {
 
 NUMERIC = [c for c in CANONICAL if c not in ["Tipo Rol","Mes","Cédula","Nombre","Fecha Ingreso","Cargo","Puesto / Cliente","Observaciones","Email"]]
 
-def _file_bytes(f):
-    """Lee el upload completo sin depender de la posición actual del puntero."""
-    if hasattr(f, "getvalue"):
-        return f.getvalue()
-    try:
-        pos=f.tell()
-    except Exception:
-        pos=None
-    try:
-        if hasattr(f,"seek"): f.seek(0)
-        data=f.read()
-    finally:
-        try:
-            if pos is not None: f.seek(pos)
-        except Exception:
-            pass
-    return data
-
-def _parse_role_sheet(raw,tipo,sheet_name):
-    h=role_header(raw)
-    headers=[norm(x) for x in raw.iloc[h].tolist()]
-    d=raw.iloc[h+1:].copy()
-    d.columns=headers
-    d=d.rename(columns={c:ALIASES[norm(c)] for c in d.columns if norm(c) in ALIASES})
-
-    # Colapsar columnas duplicadas conservando el primer dato no vacío por fila.
-    out=pd.DataFrame(index=d.index)
-    for c in list(dict.fromkeys(d.columns)):
-        sub=d.loc[:,d.columns==c]
-        out[c]=sub.bfill(axis=1).iloc[:,0] if sub.shape[1]>1 else sub.iloc[:,0]
-    d=out
-
-    if "Cédula" not in d.columns or "Nombre" not in d.columns:
-        raise ValueError(f"La hoja {sheet_name} no contiene Cédula y Nombre.")
-
-    d["Cédula"]=d["Cédula"].astype(str).str.replace(r"\.0$","",regex=True).str.strip()
-    d["Nombre"]=d["Nombre"].fillna("").astype(str).str.strip()
-    d=d[d["Cédula"].str.fullmatch(r"\d{8,13}",na=False)&d["Nombre"].ne("")].copy()
-    if d.empty:
-        return d
-
-    d["Tipo Rol"]=tipo
-    for c in CANONICAL:
-        if c not in d.columns: d[c]=np.nan
-
-    d["_Blank XIII"] = d["Décimo Tercero"].isna() | d["Décimo Tercero"].astype(str).str.strip().isin(["", "nan", "None"])
-    d["_Blank XIV"] = d["Décimo Cuarto"].isna() | d["Décimo Cuarto"].astype(str).str.strip().isin(["", "nan", "None"])
-    d["_Blank FR"] = d["Fondo Reserva"].isna() | d["Fondo Reserva"].astype(str).str.strip().isin(["", "nan", "None"])
-    d["Fecha Ingreso"]=d["Fecha Ingreso"].apply(excel_date)
-    mes=d["Mes"].apply(excel_date)
-    if mes.notna().any(): d["Mes"]=mes.dt.strftime("%Y-%m")
-    for c in NUMERIC: d[c]=as_num(d[c])
-    if tipo=="Operativos":
-        d["Cargo"]=d["Cargo"].replace("",np.nan).fillna("Guardia")
-    d["Puesto / Cliente"]=d["Puesto / Cliente"].fillna("")
-    d["_Hoja Origen"]=sheet_name
-    return d[CANONICAL + ["_Blank XIII","_Blank XIV","_Blank FR","_Hoja Origen"]].reset_index(drop=True)
+def find_role_sheet(f):
+    """Usar exclusivamente la hoja LISTA del rol; IMPORT es auxiliar."""
+    xls = pd.ExcelFile(f)
+    for s in xls.sheet_names:
+        if norm(s) == "LISTA":
+            return s
+    for s in xls.sheet_names:
+        if "LISTA" in norm(s):
+            return s
+    return xls.sheet_names[0]
 
 def role_header(raw):
-    # Buscar más filas porque algunos roles operativos tienen títulos/cabeceras adicionales.
-    for i in range(min(40,len(raw))):
+    for i in range(min(15,len(raw))):
         vals=[norm(v) for v in raw.iloc[i].tolist()]
-        has_id=any(v in ("C.I","CI","CEDULA") for v in vals)
-        has_name="NOMBRE" in vals
-        has_net=any(v in ("NETO","NETO A RECIBIR") for v in vals)
-        if has_id and has_name and has_net:
+        if "NOMBRE" in vals and any(v in ("C.I","CI","CEDULA") for v in vals) and any(v in ("NETO","NETO A RECIBIR") for v in vals):
             return i
     raise ValueError("No se encontró el encabezado del rol.")
 
 def read_role(f,tipo):
-    """Lee TODAS las hojas válidas del archivo de rol y consolida el grupo completo."""
-    data=_file_bytes(f)
-    bio=io.BytesIO(data)
-    xls=pd.ExcelFile(bio)
-    parsed=[]
-    sheets_used=[]
+    sheet = find_role_sheet(f)
+    raw = pd.read_excel(f, sheet_name=sheet, header=None, dtype=object)
+    h = role_header(raw)
 
-    for sheet in xls.sheet_names:
-        try:
-            raw=pd.read_excel(io.BytesIO(data),sheet_name=sheet,header=None,dtype=object)
-            # Solo aceptar hojas que contienen estructura real de rol.
-            role_header(raw)
-            part=_parse_role_sheet(raw,tipo,sheet)
-            if not part.empty:
-                parsed.append(part)
-                sheets_used.append(sheet)
-        except Exception:
-            continue
+    headers = [norm(x) for x in raw.iloc[h].tolist()]
+    d = raw.iloc[h+1:].copy()
+    d.columns = headers
+    d = d.rename(columns={c:ALIASES[norm(c)] for c in d.columns if norm(c) in ALIASES})
 
-    if not parsed:
-        raise ValueError(f"No pude identificar ninguna hoja válida del Rol de {tipo}. Hojas encontradas: {', '.join(xls.sheet_names)}")
+    out = pd.DataFrame(index=d.index)
+    for c in list(dict.fromkeys(d.columns)):
+        sub = d.loc[:, d.columns == c]
+        out[c] = sub.bfill(axis=1).iloc[:,0] if sub.shape[1] > 1 else sub.iloc[:,0]
+    d = out
 
-    d=pd.concat(parsed,ignore_index=True)
+    d["Cédula"] = d["Cédula"].apply(normalize_ci)
+    d["Nombre"] = d["Nombre"].fillna("").astype(str).str.strip()
+    d = d[d["Cédula"].str.fullmatch(r"\d{8,13}", na=False) & d["Nombre"].ne("")].copy()
 
-    # Si una misma persona aparece repetida en varias hojas por copia/resumen,
-    # conservar una sola fila cuando TODO el contenido contable sea idéntico.
-    compare_cols=[c for c in CANONICAL if c not in ["Tipo Rol","Observaciones","Email"]]
-    d=d.drop_duplicates(subset=compare_cols,keep="first").copy()
+    d["Tipo Rol"] = tipo
+    d["_Hoja Origen"] = sheet
 
-    # Guardar diagnóstico para mostrar exactamente qué leyó la app.
-    d=d.reset_index(drop=True)
-    d.attrs["sheets_used"]=sheets_used
-    d.attrs["source_rows"]=len(d)
-    return d
+    for c in CANONICAL:
+        if c not in d.columns:
+            d[c] = np.nan
+
+    d["_Blank XIII"] = d["Décimo Tercero"].isna() | d["Décimo Tercero"].astype(str).str.strip().isin(["", "nan", "None"])
+    d["_Blank XIV"] = d["Décimo Cuarto"].isna() | d["Décimo Cuarto"].astype(str).str.strip().isin(["", "nan", "None"])
+    d["_Blank FR"] = d["Fondo Reserva"].isna() | d["Fondo Reserva"].astype(str).str.strip().isin(["", "nan", "None"])
+
+    d["Fecha Ingreso"] = d["Fecha Ingreso"].apply(excel_date)
+    mes = d["Mes"].apply(excel_date)
+    if mes.notna().any():
+        d["Mes"] = mes.dt.strftime("%Y-%m")
+
+    for c in NUMERIC:
+        d[c] = as_num(d[c])
+
+    if tipo == "Operativos":
+        d["Cargo"] = d["Cargo"].replace("", np.nan).fillna("Guardia")
+
+    d["Puesto / Cliente"] = d["Puesto / Cliente"].fillna("")
+
+    # Un trabajador solo puede aparecer una vez por mes y tipo de rol.
+    d = d.sort_values(["Cédula","Mes"]).drop_duplicates(
+        subset=["Tipo Rol","Mes","Cédula"], keep="first"
+    )
+
+    return d[CANONICAL + ["_Blank XIII","_Blank XIV","_Blank FR","_Hoja Origen"]].reset_index(drop=True)
 
 def period_end(roles):
     for v in roles["Mes"].dropna().astype(str):
@@ -214,7 +190,21 @@ def build_benefits(roles, iess):
     b['Base Beneficios IESS']=b['Sueldo IESS']
     b['XIII Causado']=b['Base Beneficios IESS']/12.0
     b['XIV Causado']=(482.0/12.0)*(b['Días IESS'].clip(lower=0,upper=30)/30.0)
-    b['FR Causado']=np.where(b['Cumple 1 Año FR'],b['Base Beneficios IESS']/12.0,0.0)
+    # FONDO DE RESERVA:
+    # OPERATIVOS: tratamiento propio CENASE. Se causa sobre la materia gravada IESS
+    # del grupo operativo SIN aplicar el filtro general de 1 año usado para Adm/Ger.
+    # Adm/Ger: conserva validación de antigüedad.
+    b['FR Causado Teórico']=np.where(
+        b['Tipo Rol'].eq('Operativos'),
+        b['Base Beneficios IESS'] * 0.0833,
+        np.where(b['Cumple 1 Año FR'], b['Base Beneficios IESS'] * 0.0833, 0.0)
+    )
+
+    # El pago mensual real viene del propio rol.
+    # Para Operativos, el gasto contable total del grupo se determina posteriormente
+    # sobre la materia gravada IESS completa; el rol sirve para separar pago mensual
+    # y acumulación.
+    b['FR Causado']=b['FR Causado Teórico']
 
     b['Modalidad XIII']=np.where(b['_Blank XIII'],'ACUMULA','PAGO MENSUAL')
     b['Modalidad XIV']=np.where(b['_Blank XIV'],'ACUMULA','PAGO MENSUAL')
@@ -226,11 +216,14 @@ def build_benefits(roles, iess):
         'ADM/GER - IESS + modalidad según rol'
     )
     b['Modalidad FR']=np.select([
-        (~b['Cumple 1 Año FR']) & (b['Fondo Reserva'].abs()>0.005),
-        ~b['Cumple 1 Año FR'],
-        b['Cumple 1 Año FR'] & b['_Blank FR'],
-        b['Cumple 1 Año FR'] & ~b['_Blank FR']],
-        ['REVISAR: PAGO ANTES DE 1 AÑO','NO CORRESPONDE AÚN','ACUMULA','PAGO MENSUAL'],default='REVISAR')
+        b['Tipo Rol'].eq('Operativos') & b['_Blank FR'],
+        b['Tipo Rol'].eq('Operativos') & ~b['_Blank FR'],
+        ~b['Tipo Rol'].eq('Operativos') & (~b['Cumple 1 Año FR']) & (b['Fondo Reserva'].abs()>0.005),
+        ~b['Tipo Rol'].eq('Operativos') & ~b['Cumple 1 Año FR'],
+        ~b['Tipo Rol'].eq('Operativos') & b['Cumple 1 Año FR'] & b['_Blank FR'],
+        ~b['Tipo Rol'].eq('Operativos') & b['Cumple 1 Año FR'] & ~b['_Blank FR']],
+        ['ACUMULA','PAGO MENSUAL','REVISAR: PAGO ANTES DE 1 AÑO','NO CORRESPONDE AÚN','ACUMULA','PAGO MENSUAL'],
+        default='REVISAR')
 
     b['XIII Pagado Rol']=b['Décimo Tercero']
     b['XIII Acumulado']=np.where(b['Modalidad XIII'].eq('ACUMULA'),b['XIII Causado'],0.0)
@@ -341,18 +334,30 @@ def build_accounting(roles,iess,benefits,planillas):
         sueldo=max(base-ot,0.0)
         patronal=float(i['Patronal IESS'].sum())
         secap=float(i['Valor CCC'].sum())
-        fr=float(b['FR Causado'].sum())
-        xiii=float(b['XIII Causado'].sum())
-        xiv=float(b['XIV Causado'].sum())
+        # Fondo de Reserva
+        if tipo_rol == 'Operativos':
+            # Regla contable CENASE para Operativos: 8,33% de toda la materia gravada IESS
+            # del grupo. No aplicar filtro general de antigüedad.
+            fr=round(base * 0.0833, 2)
+        else:
+            # Adm/Ger: mantiene elegibilidad individual.
+            fr=float(b['FR Causado'].sum())
+
+        # XIII y XIV: el rol ya trae el cálculo de nómina aplicado persona por persona.
+        # La fórmula IESS queda como auditoría, pero NO reemplaza el valor del rol.
+        xiii=float(r['Décimo Tercero'].sum())
+        xiv=float(r['Décimo Cuarto'].sum())
 
         debit(f'{prefix}.1',f'Sueldos Unificados {suffix}',sueldo,'IESS materia gravada - sobretiempos Rol',tipo_rol)
         debit(f'{prefix}.2',f'Sobretiempos {suffix}',ot,'Rol: suplementarias + extraordinarias + recargo',tipo_rol)
         debit(f'{prefix}.3',f'Gratificaciones {suffix}',grat,'OTROS INGRESOS DEL ROL',tipo_rol)
         debit(f'{prefix}.5',f'Aportes Patronales al IESS {suffix}',patronal,'Consolidado IESS por trabajador',tipo_rol)
         debit(f'{prefix}.6',f'Secap - Iece {suffix}',secap,'SUMA Valor CCC real del Consolidado IESS por trabajador',tipo_rol)
-        debit(f'{prefix}.7',f'Fondos de Reserva {suffix}',fr,'IESS / 12 para personal con derecho; grupo separado',tipo_rol)
-        debit(f'{prefix}.8',f'Décimo Tercer Sueldo {suffix}',xiii,'Materia gravada IESS / 12',tipo_rol)
-        debit(f'{prefix}.9',f'Décimo Cuarto Sueldo {suffix}',xiv,'SBU 482 / 12 proporcional días IESS',tipo_rol)
+        debit(f'{prefix}.7',f'Fondos de Reserva {suffix}',fr,
+              'OPERATIVOS: 8,33% materia gravada IESS completa' if tipo_rol=='Operativos'
+              else 'ADM/GER: 8,33% IESS según elegibilidad individual',tipo_rol)
+        debit(f'{prefix}.8',f'Décimo Tercer Sueldo {suffix}',xiii,'VALOR REAL CALCULADO EN ROL; IESS / 12 queda como control',tipo_rol)
+        debit(f'{prefix}.9',f'Décimo Cuarto Sueldo {suffix}',xiv,'VALOR REAL CALCULADO EN ROL; SBU 482 / 12 queda como control',tipo_rol)
 
     # Pasivos / descuentos.
     xiii_acc=float(bb['XIII Acumulado'].sum())
@@ -501,7 +506,7 @@ def read_iess(f):
         if c: mapping[c]=new
 
     d=d.rename(columns={k:v for k,v in mapping.items() if k is not None and v is not None})
-    d["Cédula"]=d["Cédula"].astype(str).str.replace(r"\.0$","",regex=True).str.strip()
+    d["Cédula"]=d["Cédula"].apply(normalize_ci)
     d["Nombre IESS"]=d["Nombre IESS"].fillna("").astype(str).str.strip()
     d=d[d["Cédula"].str.fullmatch(r"\d{8,13}",na=False)&d["Nombre IESS"].ne("")].copy()
     for c in IESS_CANON:
@@ -643,25 +648,11 @@ try:
     ger=read_role(fger,"Gerentes")
     adm=read_role(fad,"Administrativos")
     ope=read_role(fop,"Operativos")
-
-    # Validación de integridad: ningún grupo puede quedar vacío.
-    if ger.empty: raise ValueError("El Rol de Gerentes quedó vacío.")
-    if adm.empty: raise ValueError("El Rol de Administración quedó vacío.")
-    if ope.empty: raise ValueError("El Rol de Operativos quedó vacío. Revise que el archivo cargado corresponda al rol operativo.")
-
-    # Detectar archivos/grupos accidentalmente duplicados antes de calcular.
-    def _idset(df): return set(df["Cédula"].dropna().astype(str))
-    if _idset(adm)==_idset(ope) and len(adm)==len(ope):
-        raise ValueError("El Rol de Operativos coincide exactamente con Administración. La app detuvo el cálculo para evitar duplicar Administrativos como Operativos. Revise el archivo de Operativos.")
-
     roles=pd.concat([ger,adm,ope],ignore_index=True)
-
-    # Una misma cédula no debería pertenecer simultáneamente a grupos distintos.
-    cross=roles.groupby("Cédula")["Tipo Rol"].nunique()
-    cross_ids=cross[cross>1].index.tolist()
-    if cross_ids:
-        st.warning(f"Hay {len(cross_ids)} cédula(s) presentes en más de un tipo de rol. Se conservarán en el consolidado, pero deben revisarse: {', '.join(cross_ids[:10])}")
-
+    dup_mask = roles.duplicated(subset=["Tipo Rol","Mes","Cédula"], keep=False)
+    if dup_mask.any():
+        st.warning(f"Se detectaron {int(dup_mask.sum())} filas duplicadas. Se conservará una sola fila por trabajador.")
+        roles = roles.drop_duplicates(subset=["Tipo Rol","Mes","Cédula"], keep="first").reset_index(drop=True)
     iess=read_iess(fiess)
     comp=make_compare(roles,iess)
     benefits=build_benefits(roles,iess)
@@ -675,10 +666,10 @@ except Exception as e:
 
 # ---------- SUMMARY ----------
 grp=roles.groupby("Tipo Rol",as_index=False).agg(
-    Empleados=("Cédula","nunique"),Total_Ingresos=("Total Ingresos","sum"),
+    Empleados=("Cédula","count"),Total_Ingresos=("Total Ingresos","sum"),
     Total_Egresos=("Total Egresos","sum"),Neto=("Neto a Recibir","sum")
 )
-total=pd.DataFrame([{"Tipo Rol":"TOTAL GENERAL","Empleados":roles["Cédula"].nunique(),
+total=pd.DataFrame([{"Tipo Rol":"TOTAL GENERAL","Empleados":len(roles),
                      "Total_Ingresos":roles["Total Ingresos"].sum(),
                      "Total_Egresos":roles["Total Egresos"].sum(),
                      "Neto":roles["Neto a Recibir"].sum()}])
@@ -688,18 +679,6 @@ summary.columns=["Tipo de Rol","Empleados","Total Ingresos","Total Egresos","Net
 diffs=comp[comp["Estado"]=="REVISAR"].copy()
 missing_role=(comp["Presencia"]=="SOLO IESS").sum()
 missing_iess=(comp["Presencia"]=="SOLO ROL").sum()
-
-st.subheader("✅ Lectura de roles")
-dg1,dg2,dg3=st.columns(3)
-dg1.metric("Gerentes leídos",ger["Cédula"].nunique())
-dg2.metric("Administrativos leídos",adm["Cédula"].nunique())
-dg3.metric("Operativos leídos",ope["Cédula"].nunique())
-st.caption(
-    "Hojas procesadas → "
-    f"Gerentes: {', '.join(ger.attrs.get('sheets_used',[])) or '—'} | "
-    f"Administración: {', '.join(adm.attrs.get('sheets_used',[])) or '—'} | "
-    f"Operativos: {', '.join(ope.attrs.get('sheets_used',[])) or '—'}"
-)
 
 a,b,c,d,e,f=st.columns(6)
 a.metric("Trabajadores Rol",roles["Cédula"].nunique())
@@ -781,7 +760,7 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("Beneficios: pago mensual vs acumulación")
-    st.caption("Base principal: materia gravada IESS. Todos los cálculos se ejecutan sobre Gerentes + Administrativos + Operativos completos. Décimos: valor en rol = pago mensual; vacío = acumula. Fondo de Reserva: fórmula IESS/12 después de 1 año, con Operativos separados de Gerentes/Administrativos.")
+    st.caption("Base principal: materia gravada IESS. Décimos: valor en rol = pago mensual; vacío = acumula. Fondo de Reserva: fórmula IESS/12 después de 1 año, con Operativos separados de Gerentes/Administrativos.")
     bcols=["Tipo Rol","Cédula","Nombre","Fecha Ingreso","Sueldo IESS","Días IESS","XIII Causado","Modalidad XIII","XIII Pagado Rol","XIII Acumulado","XIV Causado","Modalidad XIV","XIV Pagado Rol","XIV Acumulado","Cumple 1 Año FR","Regla FR","Modalidad FR","FR Causado","FR Pagado Rol","FR Acumulado"]
     st.dataframe(benefits[bcols],use_container_width=True,hide_index=True)
 
