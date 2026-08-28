@@ -23,7 +23,7 @@ div[data-testid="stMetric"]{background:white;border:1px solid #e5eaf0;padding:13
 .small{font-size:.87rem;color:#64748b}
 </style>
 <div class="hero">
-<h1>Reporte Consolidado de Roles + Conciliación IESS · v9</h1>
+<h1>Reporte Consolidado de Roles + Conciliación IESS · v11</h1>
 <p>Gerentes · Administración · Operativos · IESS | Consulta, diferencias, cuadre y descarga mensual</p>
 </div>
 """, unsafe_allow_html=True)
@@ -457,6 +457,125 @@ def add_role_employer_calcs(roles):
     r["SECAP-IECE Rol Calc 1%"] = r["Materia Gravada Rol Calc"] * 0.01
     return r
 
+
+def build_simplified_difference_report(sim):
+    """Reporte BI comparativo: filas por Tipo Rol y columnas Rol / IESS / Diferencia."""
+    groups = ["Administrativos","Gerentes","Operativos"]
+
+    def sum_by(col):
+        g = sim.groupby("Tipo Rol")[col].sum()
+        vals = [float(g.get(x, 0.0)) for x in groups]
+        return vals
+
+    def make_df(columns):
+        rows = []
+        for i, tipo in enumerate(groups):
+            row = {"Tipo": tipo}
+            for name, values in columns:
+                row[name] = values[i]
+            rows.append(row)
+        total = {"Tipo":"TOTAL GENERAL"}
+        for name, values in columns:
+            total[name] = sum(values)
+        rows.append(total)
+        return pd.DataFrame(rows)
+
+    # 1) Sueldo / materia gravada
+    sueldo = sum_by("Sueldo")
+    hs50 = sum_by("Horas Suplementarias 50%")
+    he100 = sum_by("Horas Extraordinarias 100%")
+    rec25 = sum_by("Recargo 25%")
+    otros = sum_by("Otros Ingresos")
+    total_gravado_rol = [sueldo[i]+hs50[i]+he100[i]+rec25[i]+otros[i] for i in range(3)]
+    sueldo_iess = sum_by("Sueldo IESS")
+    dif_sueldo = [sueldo_iess[i]-total_gravado_rol[i] for i in range(3)]
+    sec1 = make_df([
+        ("Sueldo Rol", sueldo),
+        ("HS 50% Rol", hs50),
+        ("HE 100% Rol", he100),
+        ("Recargo 25% Rol", rec25),
+        ("Otros Ingresos Gravados Rol", otros),
+        ("Total Gravado Rol", total_gravado_rol),
+        ("Materia Gravada IESS", sueldo_iess),
+        ("Diferencia IESS - Rol", dif_sueldo),
+    ])
+
+    # 2) Días
+    dias_rol = sum_by("Días Laborados")
+    dias_iess = sum_by("Días IESS")
+    dif_dias = [dias_iess[i]-dias_rol[i] for i in range(3)]
+    sec2 = make_df([
+        ("Días Rol", dias_rol),
+        ("Días IESS", dias_iess),
+        ("Diferencia IESS - Rol", dif_dias),
+    ])
+
+    # 3) Beneficios PAGADOS
+    xiii_r = sum_by("Décimo Tercero")
+    xiii_i = sum_by("Décimo XIII Pagado IESS")
+    xiv_r = sum_by("Décimo Cuarto")
+    xiv_i = sum_by("Décimo XIV Pagado IESS")
+    fr_r = sum_by("Fondo Reserva")
+    fr_i = sum_by("Fondo Reserva Pagado IESS")
+    dxiii = [xiii_i[i]-xiii_r[i] for i in range(3)]
+    dxiv = [xiv_i[i]-xiv_r[i] for i in range(3)]
+    dfr = [fr_i[i]-fr_r[i] for i in range(3)]
+    dtotal = [dxiii[i]+dxiv[i]+dfr[i] for i in range(3)]
+    sec3 = make_df([
+        ("XIII Rol", xiii_r), ("XIII IESS", xiii_i), ("Dif. XIII", dxiii),
+        ("XIV Rol", xiv_r), ("XIV IESS", xiv_i), ("Dif. XIV", dxiv),
+        ("FR Rol", fr_r), ("FR IESS", fr_i), ("Dif. FR", dfr),
+        ("Diferencia Total", dtotal),
+    ])
+
+    # 4) Aportes: comparación par a par Rol vs IESS
+    ind_r = sum_by("Aporte Individual Rol Calc 9.45%")
+    ind_i = sum_by("Individual IESS")
+    pat_r = sum_by("Aporte Patronal Rol Calc 11.15%")
+    pat_i = sum_by("Patronal IESS")
+    sec_r = sum_by("SECAP-IECE Rol Calc 1%")
+    sec_i = sum_by("Valor CCC")
+    dind = [ind_i[i]-ind_r[i] for i in range(3)]
+    dpat = [pat_i[i]-pat_r[i] for i in range(3)]
+    dsec = [sec_i[i]-sec_r[i] for i in range(3)]
+    dap = [dind[i]+dpat[i]+dsec[i] for i in range(3)]
+    sec4 = make_df([
+        ("Individual Rol 9.45%", ind_r), ("Individual IESS", ind_i), ("Dif. Individual", dind),
+        ("Patronal Rol 11.15%", pat_r), ("Patronal IESS", pat_i), ("Dif. Patronal", dpat),
+        ("SECAP/IECE Rol 1%", sec_r), ("CCC IESS", sec_i), ("Dif. SECAP/CCC", dsec),
+        ("Diferencia Total", dap),
+    ])
+
+    # 5) Beneficios ACUMULADOS: Rol real vs cálculo con base IESS
+    xiiia_r = sum_by("XIII Acumulado Rol")
+    xiiia_i = sum_by("Décimo XIII Acumulado IESS")
+    xiva_r = sum_by("XIV Acumulado Rol")
+    xiva_i = sum_by("Décimo XIV Acumulado IESS")
+    fra_r = sum_by("FR Acumulado Rol")
+    fra_i = sum_by("Fondo Reserva Acumulado IESS")
+    dxiiia = [xiiia_i[i]-xiiia_r[i] for i in range(3)]
+    dxiva = [xiva_i[i]-xiva_r[i] for i in range(3)]
+    dfra = [fra_i[i]-fra_r[i] for i in range(3)]
+    dacc = [dxiiia[i]+dxiva[i]+dfra[i] for i in range(3)]
+    sec5 = make_df([
+        ("XIII Acum. Rol", xiiia_r), ("XIII Acum. IESS", xiiia_i), ("Dif. XIII", dxiiia),
+        ("XIV Acum. Rol", xiva_r), ("XIV Acum. IESS", xiva_i), ("Dif. XIV", dxiva),
+        ("FR Acum. Rol", fra_r), ("FR Acum. IESS", fra_i), ("Dif. FR", dfra),
+        ("Diferencia Total", dacc),
+    ])
+
+    # 6) Resumen ejecutivo de diferencias
+    resumen = pd.DataFrame({
+        "Tipo": groups + ["TOTAL GENERAL"],
+        "Dif. Sueldo": dif_sueldo + [sum(dif_sueldo)],
+        "Dif. Días": dif_dias + [sum(dif_dias)],
+        "Dif. Beneficios Pagados": dtotal + [sum(dtotal)],
+        "Dif. Aportes": dap + [sum(dap)],
+        "Dif. Acumulados": dacc + [sum(dacc)],
+    })
+    return sec1, sec2, sec3, sec4, sec5, resumen
+
+
 def build_iess_simulated_role(roles, iess):
     ig = iess.groupby("Cédula", as_index=False).agg({
         "Nombre IESS":"first","Rel. Trabajo":"first","Sueldo IESS":"sum","Días IESS":"sum",
@@ -482,10 +601,39 @@ def build_iess_simulated_role(roles, iess):
     s["FR Pagado Simulado"] = np.where(fr_acumula, 0.0, s["FR Simulado IESS"])
     s["FR Acumulado Simulado"] = np.where(fr_acumula, s["FR Simulado IESS"], 0.0)
 
+    # ACUMULADOS DEL ROL REAL: se calculan de forma independiente con la base y días del Rol.
+    # Se conserva la misma modalidad de acumulación por trabajador para hacer una comparación válida.
+    s["XIII Acumulado Rol"] = np.where(
+        s["_Blank XIII"],
+        s["Materia Gravada Rol Calc"] / 12.0,
+        0.0
+    )
+    s["XIV Acumulado Rol"] = np.where(
+        s["_Blank XIV"],
+        (482.0 / 12.0) * (s["Días Laborados"].clip(lower=0, upper=30) / 30.0),
+        0.0
+    )
+    s["FR Causado Rol"] = np.where(
+        s["Tipo Rol"].eq("Operativos"),
+        s["Materia Gravada Rol Calc"] * 0.0833,
+        np.where(cumple_ano, s["Materia Gravada Rol Calc"] * 0.0833, 0.0)
+    )
+    s["FR Acumulado Rol"] = np.where(fr_acumula, s["FR Causado Rol"], 0.0)
+
     # Obligaciones acumuladas del Rol Simulado IESS.
     s["Décimo XIII Acumulado IESS"] = s["XIII Acumulado Simulado"]
     s["Décimo XIV Acumulado IESS"] = s["XIV Acumulado Simulado"]
     s["Fondo Reserva Acumulado IESS"] = s["FR Acumulado Simulado"]
+
+    s["Dif. XIII Acumulado IESS - Rol"] = s["Décimo XIII Acumulado IESS"] - s["XIII Acumulado Rol"]
+    s["Dif. XIV Acumulado IESS - Rol"] = s["Décimo XIV Acumulado IESS"] - s["XIV Acumulado Rol"]
+    s["Dif. FR Acumulado IESS - Rol"] = s["Fondo Reserva Acumulado IESS"] - s["FR Acumulado Rol"]
+    s["Dif. Total Acumulados IESS - Rol"] = (
+        s["Dif. XIII Acumulado IESS - Rol"]
+        + s["Dif. XIV Acumulado IESS - Rol"]
+        + s["Dif. FR Acumulado IESS - Rol"]
+    )
+
     s["Décimo XIII Pagado IESS"] = s["XIII Pagado Simulado"]
     s["Décimo XIV Pagado IESS"] = s["XIV Pagado Simulado"]
     s["Fondo Reserva Pagado IESS"] = s["FR Pagado Simulado"]
@@ -694,6 +842,49 @@ def export_excel(roles,summary,compare,diffs,benefits,planillas,plan_compare,acc
         ws.freeze_panes(3,0); ws.autofilter(2,0,2+len(sim_export),max(0,len(sim_export.columns)-1))
         ws.set_column(0,max(0,len(sim_export.columns)-1),18)
 
+        # Reporte BI comparativo
+        ds1,ds2,ds3,ds4,ds5,ds6 = build_simplified_difference_report(sim_iess)
+        wsbi = wb.add_worksheet("Diferencias BI")
+        writer.sheets["Diferencias BI"] = wsbi
+        bi_title = wb.add_format({"bold":True,"font_size":14,"font_color":"#FFFFFF","bg_color":"#0B4F88","align":"center","border":1})
+        bi_head = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#0D5FA6","align":"center","border":1,"text_wrap":True})
+        bi_money = wb.add_format({"num_format":'$#,##0.00;[Red]-$#,##0.00',"border":1})
+        bi_num = wb.add_format({"num_format":'#,##0.00',"border":1})
+        bi_text = wb.add_format({"border":1})
+        bi_diff = wb.add_format({"bold":True,"num_format":'$#,##0.00;[Red]-$#,##0.00',"border":1,"bg_color":"#FFF2CC"})
+        bi_diff_num = wb.add_format({"bold":True,"num_format":'#,##0.00',"border":1,"bg_color":"#FFF2CC"})
+        wsbi.set_column(0,0,22)
+
+        r0 = 0
+        sections = [
+            ("1. SUELDO / MATERIA GRAVADA", ds1, False),
+            ("2. DÍAS ROL VS IESS", ds2, True),
+            ("3. BENEFICIOS PAGADOS — ROL VS IESS", ds3, False),
+            ("4. APORTES — ROL VS IESS", ds4, False),
+            ("5. BENEFICIOS ACUMULADOS — ROL VS IESS", ds5, False),
+            ("6. RESUMEN DE DIFERENCIAS", ds6, False),
+        ]
+        for ttl, dfx, is_days in sections:
+            wsbi.merge_range(r0,0,r0,max(1,len(dfx.columns)-1),ttl,bi_title); r0 += 1
+            for j,c in enumerate(dfx.columns):
+                wsbi.write(r0,j,c,bi_head)
+                wsbi.set_column(j,j,19 if j else 22)
+            r0 += 1
+            for _, rr in dfx.iterrows():
+                for j,c in enumerate(dfx.columns):
+                    if j == 0:
+                        wsbi.write(r0,j,str(rr[c]),bi_text)
+                    else:
+                        isdiff = ("Dif." in c or "Diferencia" in c)
+                        if is_days:
+                            fmt = bi_diff_num if isdiff else bi_num
+                        else:
+                            fmt = bi_diff if isdiff else bi_money
+                        wsbi.write_number(r0,j,float(rr[c]),fmt)
+                r0 += 1
+            r0 += 2
+        wsbi.freeze_panes(2,1)
+
         # Hojas adicionales
         for sheet,df in [("IESS vs Planillas",plan_compare),("Planillas Pagadas",planillas),("Beneficios",benefits.drop(columns=["_Blank XIII","_Blank XIV","_Blank FR"],errors="ignore")),("Asiento Propuesto",accounting),("Pago IESS Real",payment_accounting)]:
             df.to_excel(writer,sheet_name=sheet,index=False,startrow=2)
@@ -767,7 +958,7 @@ d.metric("Solo en Rol",int(missing_iess))
 e.metric("Solo en IESS",int(missing_role))
 f.metric("Neto Roles",fmt_money(roles["Neto a Recibir"].sum()))
 
-tabs=st.tabs(["📊 Resumen Roles","🏛️ Rol vs IESS","🧮 Rol Simulado IESS","⚠️ Diferencias","💳 IESS vs Planillas","🎁 Beneficios","🧾 Contabilidad","🔎 Consulta Roles","✅ Cuadre"])
+tabs=st.tabs(["📊 Resumen Roles","🏛️ Rol vs IESS","🧮 Rol Simulado IESS","⚠️ Diferencias","💳 IESS vs Planillas","🎁 Beneficios","🧾 Contabilidad","🔎 Consulta Roles","✅ Cuadre","🚦 Diferencias Simplificado"])
 
 with tabs[0]:
     show=summary.copy()
@@ -834,7 +1025,7 @@ with tabs[2]:
     a2.metric("XIV acumulado IESS",fmt_money(sv["Décimo XIV Acumulado IESS"].sum()))
     a3.metric("F.R. acumulado IESS",fmt_money(sv["Fondo Reserva Acumulado IESS"].sum()))
     a4.metric("Total acumulado",fmt_money(sv["Total Beneficios Acumulados IESS"].sum()))
-    sim_cols=["Estado Simulación","Tipo Rol","Cédula","Nombre","Cargo","Puesto / Cliente","Días Laborados","Días IESS","Dif. Días Rol vs IESS","Materia Gravada Rol Calc","Sueldo IESS","Dif. Materia Gravada Rol vs IESS","Sueldo Base Simulado IESS","Sobretiempos Rol","Otros Ingresos Gravados Rol","Décimo Tercero","XIII Simulado IESS","Décimo XIII Pagado IESS","Décimo XIII Acumulado IESS","Dif. XIII Rol vs Sim IESS","Décimo Cuarto","XIV Simulado IESS","Décimo XIV Pagado IESS","Décimo XIV Acumulado IESS","Dif. XIV Rol vs Sim IESS","Fondo Reserva","FR Simulado IESS","Fondo Reserva Pagado IESS","Fondo Reserva Acumulado IESS","Total Beneficios Pagados IESS","Total Beneficios Acumulados IESS","Dif. FR Rol vs Sim IESS","IESS","Individual IESS","Dif. Individual Rol vs IESS","Aporte Patronal Rol Calc 11.15%","Patronal IESS","Dif. Patronal Calc Rol vs IESS","SECAP-IECE Rol Calc 1%","Valor CCC","Dif. SECAP Calc Rol vs IESS","Total Ingresos","Total Ingresos Simulado IESS","Dif. Total Ingresos Rol vs Sim IESS","Total Egresos","Total Egresos Simulado IESS","Dif. Total Egresos Rol vs Sim IESS","Neto a Recibir","Neto Simulado IESS","Dif. Neto Rol vs Sim IESS"]
+    sim_cols=["Estado Simulación","Tipo Rol","Cédula","Nombre","Cargo","Puesto / Cliente","Días Laborados","Días IESS","Dif. Días Rol vs IESS","Materia Gravada Rol Calc","Sueldo IESS","Dif. Materia Gravada Rol vs IESS","Sueldo Base Simulado IESS","Sobretiempos Rol","Otros Ingresos Gravados Rol","Décimo Tercero","XIII Simulado IESS","Décimo XIII Pagado IESS","Décimo XIII Acumulado IESS","Dif. XIII Rol vs Sim IESS","Décimo Cuarto","XIV Simulado IESS","Décimo XIV Pagado IESS","Décimo XIV Acumulado IESS","Dif. XIV Rol vs Sim IESS","Fondo Reserva","FR Simulado IESS","Fondo Reserva Pagado IESS","FR Acumulado Rol","Fondo Reserva Acumulado IESS","Dif. FR Acumulado IESS - Rol","XIII Acumulado Rol","Décimo XIII Acumulado IESS","Dif. XIII Acumulado IESS - Rol","XIV Acumulado Rol","Décimo XIV Acumulado IESS","Dif. XIV Acumulado IESS - Rol","Total Beneficios Pagados IESS","Total Beneficios Acumulados IESS","Dif. Total Acumulados IESS - Rol","Dif. FR Rol vs Sim IESS","IESS","Individual IESS","Dif. Individual Rol vs IESS","Aporte Patronal Rol Calc 11.15%","Patronal IESS","Dif. Patronal Calc Rol vs IESS","SECAP-IECE Rol Calc 1%","Valor CCC","Dif. SECAP Calc Rol vs IESS","Total Ingresos","Total Ingresos Simulado IESS","Dif. Total Ingresos Rol vs Sim IESS","Total Egresos","Total Egresos Simulado IESS","Dif. Total Egresos Rol vs Sim IESS","Neto a Recibir","Neto Simulado IESS","Dif. Neto Rol vs Sim IESS"]
     st.dataframe(sv[sim_cols],use_container_width=True,hide_index=True)
     st.markdown("#### Resumen por grupo")
     sim_summary=sv.groupby("Tipo Rol",as_index=False).agg(Trabajadores=("Cédula","count"),Materia_Gravada_Rol=("Materia Gravada Rol Calc","sum"),Materia_Gravada_IESS=("Sueldo IESS","sum"),Patronal_Rol_Calc=("Aporte Patronal Rol Calc 11.15%","sum"),Patronal_IESS=("Patronal IESS","sum"),SECAP_Rol_Calc=("SECAP-IECE Rol Calc 1%","sum"),CCC_IESS=("Valor CCC","sum"),Neto_Rol=("Neto a Recibir","sum"),Neto_Simulado_IESS=("Neto Simulado IESS","sum"),Diferencia_Neto=("Dif. Neto Rol vs Sim IESS","sum"))
@@ -958,3 +1149,50 @@ st.download_button("⬇️ Descargar reporte completo Roles + IESS",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                    use_container_width=True)
 st.markdown('<p class="small">El archivo descargado incluye además Rol Simulado IESS y los nuevos campos patronales calculados dentro del Rol real.</p>',unsafe_allow_html=True)
+
+with tabs[9]:
+    st.subheader("📊 Reporte BI de Diferencias Rol vs IESS")
+    st.caption("Comparación directa Rol → IESS → Diferencia. Las filas son los grupos de nómina y las columnas muestran los valores comparables.")
+
+    ds1,ds2,ds3,ds4,ds5,ds6 = build_simplified_difference_report(sim_iess)
+
+    def show_bi_table(title, df, day_table=False):
+        st.markdown(f"#### {title}")
+        fmt = {}
+        for c in df.columns:
+            if c == "Tipo":
+                continue
+            if day_table:
+                fmt[c] = "{:,.2f}"
+            else:
+                fmt[c] = "${:,.2f}"
+        styled = df.style.format(fmt)
+        diff_cols = [c for c in df.columns if "Dif." in c or "Diferencia" in c]
+        if diff_cols:
+            styled = styled.set_properties(subset=diff_cols, **{"font-weight":"bold"})
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    show_bi_table("1. Sueldo / Materia gravada", ds1)
+    show_bi_table("2. Días Rol vs IESS", ds2, day_table=True)
+    show_bi_table("3. Beneficios pagados — Rol vs IESS", ds3)
+    show_bi_table("4. Aportes — Rol vs IESS", ds4)
+    show_bi_table("5. Beneficios acumulados — Rol vs IESS", ds5)
+
+    st.markdown("#### 6. Resumen de diferencias")
+    resumen_fmt = {
+        "Dif. Sueldo":"${:,.2f}",
+        "Dif. Días":"{:,.2f}",
+        "Dif. Beneficios Pagados":"${:,.2f}",
+        "Dif. Aportes":"${:,.2f}",
+        "Dif. Acumulados":"${:,.2f}",
+    }
+    st.dataframe(
+        ds6.style.format(resumen_fmt).set_properties(
+            subset=["Dif. Sueldo","Dif. Días","Dif. Beneficios Pagados","Dif. Aportes","Dif. Acumulados"],
+            **{"font-weight":"bold"}
+        ),
+        use_container_width=True,
+        hide_index=True
+    )
+    st.info("En acumulados, el lado Rol y el lado IESS se calculan de forma independiente. Por eso una diferencia $0,00 significa que realmente cuadran, no que se está comparando IESS contra sí mismo.")
+
