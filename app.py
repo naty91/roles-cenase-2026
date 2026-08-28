@@ -34,7 +34,7 @@ div[data-testid="stMetric"]{background:white;border:1px solid #e5eaf0;padding:13
 .small{font-size:.87rem;color:#64748b}
 </style>
 <div class="hero">
-<h1>Reporte Consolidado de Roles + Conciliación IESS · v14</h1>
+<h1>Reporte Consolidado de Roles + Conciliación IESS · v17</h1>
 <p>Gerentes · Administración · Operativos · IESS | Consulta, diferencias, cuadre y descarga mensual</p>
 </div>
 """, unsafe_allow_html=True)
@@ -1151,63 +1151,106 @@ def make_role_summary_pdf(roles, benefits, mes):
     ],subtitle="Resumen por Administrativos, Gerentes y Operativos. Los beneficios pagados y acumulados se muestran por separado, igual que en el control mensual.",page="A3",max_cols=6)
 
 
-def make_unified_role_pdf(roles, mes):
-    """Printable payroll form: one readable table per employee group, with signature column."""
+def make_unified_role_pdf(roles, mes, benefits=None):
+    """PDF del Rol en formato resumen tipo tabla dinámica, como el control Excel del usuario."""
     out=io.BytesIO()
     pagesize=landscape(A3)
-    doc=SimpleDocTemplate(out,pagesize=pagesize,rightMargin=8*mm,leftMargin=8*mm,topMargin=10*mm,bottomMargin=14*mm,title=f"ROL DE PAGOS {mes}",author="CENASE")
+    doc=SimpleDocTemplate(
+        out,pagesize=pagesize,rightMargin=8*mm,leftMargin=8*mm,
+        topMargin=8*mm,bottomMargin=12*mm,title=f"ROL DE PAGOS {mes}",author="CENASE"
+    )
     base=getSampleStyleSheet()
-    title_style=ParagraphStyle("RoleTitle",parent=base["Title"],fontName="Helvetica-Bold",fontSize=18,leading=20,alignment=1,textColor=PDF_BLUE)
-    sub_style=ParagraphStyle("RoleSub",parent=base["Normal"],fontName="Helvetica-Bold",fontSize=11,leading=13,alignment=1,textColor=PDF_TEXT)
-    sect_style=ParagraphStyle("RoleSect",parent=base["Heading2"],fontName="Helvetica-Bold",fontSize=12,leading=14,textColor=PDF_BLUE,spaceBefore=3*mm,spaceAfter=2*mm)
-    head_style=ParagraphStyle("RoleHead",parent=base["Normal"],fontName="Helvetica-Bold",fontSize=7.2,leading=8.2,alignment=1,textColor=PDF_TEXT)
-    cell_style=ParagraphStyle("RoleCell",parent=base["Normal"],fontSize=7.5,leading=8.6,textColor=PDF_TEXT)
-    cell_center=ParagraphStyle("RoleCellCenter",parent=cell_style,alignment=1)
-    story=[Paragraph("CENASE",sub_style),Paragraph("ROL DE PAGOS",title_style),Paragraph(f"MES: {mes}",sub_style),Spacer(1,4*mm)]
-    usable=pagesize[0]-16*mm
-    cols=["N°","Nombres","Cargo","Sueldo","Horas Extras","Otros Ingresos","XIII","XIV","F. Reserva","Total Ingresos","IESS","Anticipos","P. Quirografario","Otros Egresos","Total Egresos","Líquido a Recibir","Firma"]
-    weights=[0.55,2.35,1.65,1.0,1.0,1.0,0.85,0.85,0.9,1.05,0.9,0.9,1.0,1.0,1.0,1.1,1.15]
-    widths=[usable*w/sum(weights) for w in weights]
-    for ti,tipo in enumerate(["Administrativos","Gerentes","Operativos"]):
-        g=roles[roles["Tipo Rol"]==tipo].copy().sort_values("Nombre")
-        if g.empty:
-            continue
-        story.append(Paragraph(tipo.upper(),sect_style))
-        data=[[Paragraph(c,head_style) for c in cols]]
-        sums={k:0.0 for k in ["Sueldo","Horas Extras","Otros Ingresos","XIII","XIV","F. Reserva","Total Ingresos","IESS","Anticipos","P. Quirografario","Otros Egresos","Total Egresos","Líquido a Recibir"]}
-        for i,(_,r) in enumerate(g.iterrows(),start=1):
-            horas=float(r.get("Horas Suplementarias 50%",0) or 0)+float(r.get("Horas Extraordinarias 100%",0) or 0)+float(r.get("Recargo 25%",0) or 0)
-            otros_egr=float(r.get("Préstamo Hipotecario",0) or 0)+float(r.get("Faltas / Pérdida Remuneración",0) or 0)+float(r.get("Otros Egresos",0) or 0)+float(r.get("Multa",0) or 0)+float(r.get("Impuesto Renta",0) or 0)
-            vals={
-                "Sueldo":float(r.get("Sueldo",0) or 0),"Horas Extras":horas,"Otros Ingresos":float(r.get("Otros Ingresos",0) or 0),
-                "XIII":float(r.get("Décimo Tercero",0) or 0),"XIV":float(r.get("Décimo Cuarto",0) or 0),"F. Reserva":float(r.get("Fondo Reserva",0) or 0),
-                "Total Ingresos":float(r.get("Total Ingresos",0) or 0),"IESS":float(r.get("IESS",0) or 0),"Anticipos":float(r.get("Anticipos",0) or 0),
-                "P. Quirografario":float(r.get("Préstamo Quirografario",0) or 0),"Otros Egresos":otros_egr,"Total Egresos":float(r.get("Total Egresos",0) or 0),
-                "Líquido a Recibir":float(r.get("Neto a Recibir",0) or 0)
-            }
-            for k,v in vals.items(): sums[k]+=v
-            row=[str(i),str(r.get("Nombre","")),str(r.get("Cargo","")),_pdf_money(vals["Sueldo"]),_pdf_money(vals["Horas Extras"]),_pdf_money(vals["Otros Ingresos"]),
-                 _pdf_money(vals["XIII"]),_pdf_money(vals["XIV"]),_pdf_money(vals["F. Reserva"]),_pdf_money(vals["Total Ingresos"]),_pdf_money(vals["IESS"]),
-                 _pdf_money(vals["Anticipos"]),_pdf_money(vals["P. Quirografario"]),_pdf_money(vals["Otros Egresos"]),_pdf_money(vals["Total Egresos"]),_pdf_money(vals["Líquido a Recibir"]),""]
-            data.append([Paragraph(x,cell_center if j not in [1,2] else cell_style) for j,x in enumerate(row)])
-        totalrow=["","TOTAL","",_pdf_money(sums["Sueldo"]),_pdf_money(sums["Horas Extras"]),_pdf_money(sums["Otros Ingresos"]),_pdf_money(sums["XIII"]),_pdf_money(sums["XIV"]),_pdf_money(sums["F. Reserva"]),_pdf_money(sums["Total Ingresos"]),_pdf_money(sums["IESS"]),_pdf_money(sums["Anticipos"]),_pdf_money(sums["P. Quirografario"]),_pdf_money(sums["Otros Egresos"]),_pdf_money(sums["Total Egresos"]),_pdf_money(sums["Líquido a Recibir"]),""]
-        data.append([Paragraph(f"<b>{x}</b>",cell_center if j not in [1,2] else cell_style) for j,x in enumerate(totalrow)])
+    title=ParagraphStyle("PivotRoleTitle",parent=base["Title"],fontName="Helvetica-Bold",fontSize=15,leading=18,alignment=1,textColor=PDF_BLUE)
+    sub=ParagraphStyle("PivotRoleSub",parent=base["Normal"],fontName="Helvetica-Bold",fontSize=8.5,leading=10,alignment=1,textColor=PDF_TEXT)
+    head=ParagraphStyle("PivotRoleHead",parent=base["Normal"],fontName="Helvetica-Bold",fontSize=6.5,leading=7.2,alignment=1,textColor=PDF_TEXT)
+    head_white=ParagraphStyle("PivotRoleHeadWhite",parent=head,textColor=colors.white)
+    cell=ParagraphStyle("PivotRoleCell",parent=base["Normal"],fontSize=7.1,leading=8.2,textColor=PDF_TEXT)
+    money=ParagraphStyle("PivotRoleMoney",parent=cell,alignment=2)
+    total=ParagraphStyle("PivotRoleTotal",parent=cell,fontName="Helvetica-Bold")
+    total_money=ParagraphStyle("PivotRoleTotalMoney",parent=money,fontName="Helvetica-Bold")
+    story=[Paragraph("CENASE",sub),Paragraph("ROL DE PAGOS",title),Paragraph(f"MES: {mes}",sub),Spacer(1,2.5*mm)]
+
+    ingreso_cols=["Sueldo","Horas Suplementarias 50%","Horas Extraordinarias 100%","Recargo 25%","Décimo Tercero","Décimo Cuarto","Fondo Reserva","Movilización","Otros Ingresos","Total Ingresos"]
+    egreso_cols=["IESS","Anticipos","Faltas / Pérdida Remuneración","Préstamo Quirografario","Préstamo Hipotecario","Otros Egresos","Multa","Impuesto Renta","Total Egresos","Neto a Recibir"]
+    ing=_group_sum_table(roles,ingreso_cols)
+    egr=_group_sum_table(roles,egreso_cols)
+    pag=_group_sum_table(roles,["Décimo Tercero","Décimo Cuarto","Fondo Reserva"],{
+        "Décimo Tercero":"XIII Pagado Rol","Décimo Cuarto":"XIV Pagado Rol","Fondo Reserva":"FR Pagado Rol"})
+
+    if benefits is None:
+        try:
+            benefits=build_benefits(roles)
+        except Exception:
+            benefits=pd.DataFrame()
+    acc_rows=[]
+    for tipo in ["Administrativos","Gerentes","Operativos"]:
+        g=benefits[benefits["Tipo Rol"]==tipo] if benefits is not None and not benefits.empty and "Tipo Rol" in benefits.columns else pd.DataFrame()
+        acc_rows.append({
+            "Tipo de Rol":tipo,
+            "XIII Acumulado":pd.to_numeric(g.get("XIII Acumulado",0),errors="coerce").fillna(0).sum() if not g.empty else 0.0,
+            "XIV Acumulado":pd.to_numeric(g.get("XIV Acumulado",0),errors="coerce").fillna(0).sum() if not g.empty else 0.0,
+            "FR Acumulado":pd.to_numeric(g.get("FR Acumulado",0),errors="coerce").fillna(0).sum() if not g.empty else 0.0,
+        })
+    acc=pd.DataFrame(acc_rows)
+    acc=pd.concat([acc,pd.DataFrame([{
+        "Tipo de Rol":"TOTAL GENERAL",
+        "XIII Acumulado":acc["XIII Acumulado"].sum(),
+        "XIV Acumulado":acc["XIV Acumulado"].sum(),
+        "FR Acumulado":acc["FR Acumulado"].sum(),
+    }])],ignore_index=True)
+
+    def table_block(df, header_bg, header_fg, widths, compact=False):
+        cols=list(df.columns)
+        data=[]
+        hstyle=head_white if header_fg==colors.white else head
+        data.append([Paragraph(str(c).replace("Tipo de Rol","Etiquetas de fila"),hstyle) for c in cols])
+        for _,r in df.iterrows():
+            is_total="TOTAL" in str(r.iloc[0]).upper()
+            row=[]
+            for j,c in enumerate(cols):
+                if j==0:
+                    txt=str(r[c])
+                    sty=total if is_total else cell
+                else:
+                    txt=_pdf_money(r[c])
+                    sty=total_money if is_total else money
+                row.append(Paragraph(txt,sty))
+            data.append(row)
         tbl=Table(data,colWidths=widths,repeatRows=1,hAlign="LEFT")
         total_idx=len(data)-1
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#E9EEF5")),
-            ("TEXTCOLOR",(0,0),(-1,0),PDF_TEXT),("GRID",(0,0),(-1,-1),0.5,colors.HexColor("#7F8C99")),
-            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("LEFTPADDING",(0,0),(-1,-1),2.5),("RIGHTPADDING",(0,0),(-1,-1),2.5),
-            ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
-            ("BACKGROUND",(3,total_idx),(15,total_idx),PDF_YELLOW),("BACKGROUND",(16,1),(16,-1),PDF_GREEN),
-            ("SPAN",(0,total_idx),(0,total_idx)),
-        ]))
-        story += [tbl,Spacer(1,5*mm)]
-        if ti<2:
-            story.append(PageBreak())
+        cmds=[
+            ("BACKGROUND",(0,0),(-1,0),header_bg),
+            ("TEXTCOLOR",(0,0),(-1,0),header_fg),
+            ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C7CED6")),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("LEFTPADDING",(0,0),(-1,-1),2.2),("RIGHTPADDING",(0,0),(-1,-1),2.2),
+            ("TOPPADDING",(0,0),(-1,-1),2.0),("BOTTOMPADDING",(0,0),(-1,-1),2.0),
+            ("BACKGROUND",(0,total_idx),(-1,total_idx),colors.HexColor("#D9E4F0")),
+            ("FONTNAME",(0,total_idx),(-1,total_idx),"Helvetica-Bold"),
+        ]
+        if compact:
+            cmds += [("TOPPADDING",(0,0),(-1,-1),1.6),("BOTTOMPADDING",(0,0),(-1,-1),1.6)]
+        tbl.setStyle(TableStyle(cmds))
+        return tbl
+
+    usable=pagesize[0]-16*mm
+    # Dos bloques anchos, iguales al Excel: etiqueta + 10 columnas de valores.
+    w0=32*mm
+    rest=(usable-w0)/10
+    wide_widths=[w0]+[rest]*10
+    story.append(table_block(ing,colors.HexColor("#D9E4F0"),PDF_TEXT,wide_widths))
+    story.append(Spacer(1,2.5*mm))
+    story.append(table_block(egr,colors.HexColor("#A43A37"),colors.white,wide_widths))
+    story.append(Spacer(1,2.5*mm))
+
+    # Beneficios pagados y acumulados, como en la parte inferior del Excel.
+    small_widths=[34*mm,38*mm,38*mm,38*mm]
+    story.append(table_block(pag,colors.HexColor("#D9E4F0"),PDF_TEXT,small_widths,compact=True))
+    story.append(Spacer(1,1.8*mm))
+    story.append(table_block(acc,colors.HexColor("#A43A37"),colors.white,small_widths,compact=True))
+
     doc.build(story,onFirstPage=_pdf_footer,onLaterPages=_pdf_footer)
     return out.getvalue()
-
 
 def make_bi_pdf(ds1,ds2,ds3,ds4,ds5,ds6,mes):
     return make_pdf_report(f"REPORTE BI DE DIFERENCIAS ROL VS IESS - {mes}",[
@@ -1469,8 +1512,8 @@ with tabs[0]:
     p1,p2=st.columns(2)
     pdf_resumen=make_role_summary_pdf(roles,benefits,mes_pdf)
     p1.download_button("📄 Descargar Resumen en PDF",pdf_resumen,file_name=f"Resumen_Roles_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_resumen")
-    pdf_rol_unificado=make_unified_role_pdf(roles,mes_pdf)
-    p2.download_button("📄 Descargar Rol Unificado en PDF",pdf_rol_unificado,file_name=f"Rol_Unificado_CENASE_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_rol_unificado")
+    pdf_rol_unificado=make_unified_role_pdf(roles,mes_pdf,benefits)
+    p2.download_button("📄 Descargar Rol en PDF",pdf_rol_unificado,file_name=f"Rol_Pagos_CENASE_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_rol_unificado")
 
 with tabs[1]:
     st.subheader("Conciliación individual Rol vs IESS")

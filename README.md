@@ -47,3 +47,11 @@ No subas esas credenciales a GitHub. Streamlit Secrets las mantiene fuera del re
 - Rol Unificado rediseñado como ROL DE PAGOS imprimible, con letra mayor, totales y columna de firma.
 - Resumen del Rol ahora replica el control mensual: ingresos, egresos, beneficios pagados y beneficios acumulados.
 - Todos los demás PDFs usan fuente mayor y dividen tablas anchas en bloques legibles en vez de reducir excesivamente la letra.
+
+## v17 - Rol PDF tipo tabla dinamica
+- El botón **Descargar Rol en PDF** genera ahora el rol mensual en formato resumen, igual al control Excel validado.
+- Bloque 1: ingresos por Administrativos, Gerentes, Operativos y Total General.
+- Bloque 2: egresos y Neto a Recibir.
+- Bloque 3: XIII, XIV y Fondo de Reserva pagados en el Rol.
+- Bloque 4: XIII, XIV y Fondo de Reserva acumulados.
+- Los cuatro bloques se presentan en una sola pagina A3 horizontal para conservar la letra legible y todas las columnas visibles.
