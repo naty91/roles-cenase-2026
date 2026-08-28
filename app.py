@@ -1,8 +1,13 @@
 
 import io
 import re
+import json
+import gzip
+import base64
 import unicodedata
 from datetime import datetime
+
+import requests
 
 import numpy as np
 import pandas as pd
@@ -29,10 +34,134 @@ div[data-testid="stMetric"]{background:white;border:1px solid #e5eaf0;padding:13
 .small{font-size:.87rem;color:#64748b}
 </style>
 <div class="hero">
-<h1>Reporte Consolidado de Roles + Conciliación IESS · v13</h1>
+<h1>Reporte Consolidado de Roles + Conciliación IESS · v14</h1>
 <p>Gerentes · Administración · Operativos · IESS | Consulta, diferencias, cuadre y descarga mensual</p>
 </div>
 """, unsafe_allow_html=True)
+
+# ---------- PERSISTENCIA PERMANENTE (SUPABASE) ----------
+# La app guarda una copia comprimida de los datos procesados por período.
+# Las credenciales se leen exclusivamente desde Streamlit Secrets y nunca se
+# escriben dentro del repositorio.
+
+def get_storage_config():
+    try:
+        if "supabase" not in st.secrets:
+            return None
+        cfg=st.secrets["supabase"]
+        url=str(cfg.get("url","")).strip().rstrip("/")
+        key=str(cfg.get("service_role_key", cfg.get("key",""))).strip()
+        if not url or not key:
+            return None
+        return {"url":url,"key":key}
+    except Exception:
+        return None
+
+
+def _storage_headers(cfg, prefer=None):
+    h={
+        "apikey":cfg["key"],
+        "Authorization":f"Bearer {cfg['key']}",
+        "Content-Type":"application/json",
+    }
+    if prefer:
+        h["Prefer"]=prefer
+    return h
+
+
+def _df_to_json(df):
+    return df.to_json(orient="split",date_format="iso",double_precision=15)
+
+
+def _df_from_json(txt):
+    d=pd.read_json(io.StringIO(txt),orient="split",convert_dates=True)
+    if "Fecha Ingreso" in d.columns:
+        d["Fecha Ingreso"]=pd.to_datetime(d["Fecha Ingreso"],errors="coerce")
+    for c in ["Fecha generación","Fecha pago","Vencimiento"]:
+        if c in d.columns:
+            d[c]=pd.to_datetime(d[c],errors="coerce")
+    return d
+
+
+def _pack_snapshot(periodo,roles,iess,planillas):
+    obj={
+        "schema_version":1,
+        "period":periodo,
+        "saved_at":datetime.now().isoformat(timespec="seconds"),
+        "roles":_df_to_json(roles),
+        "iess":_df_to_json(iess),
+        "planillas":_df_to_json(planillas),
+    }
+    raw=json.dumps(obj,ensure_ascii=False,separators=(",",":")).encode("utf-8")
+    return base64.b64encode(gzip.compress(raw,compresslevel=9)).decode("ascii")
+
+
+def _unpack_snapshot(payload):
+    raw=gzip.decompress(base64.b64decode(payload.encode("ascii")))
+    obj=json.loads(raw.decode("utf-8"))
+    return {
+        "period":obj.get("period",""),
+        "saved_at":obj.get("saved_at",""),
+        "roles":_df_from_json(obj["roles"]),
+        "iess":_df_from_json(obj["iess"]),
+        "planillas":_df_from_json(obj["planillas"]),
+    }
+
+
+def storage_list(cfg):
+    r=requests.get(
+        f"{cfg['url']}/rest/v1/cenase_monthly_closings",
+        headers=_storage_headers(cfg),
+        params={"select":"period,saved_at","order":"period.desc"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def storage_load(cfg,periodo):
+    r=requests.get(
+        f"{cfg['url']}/rest/v1/cenase_monthly_closings",
+        headers=_storage_headers(cfg),
+        params={"select":"payload","period":f"eq.{periodo}","limit":"1"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    rows=r.json()
+    if not rows:
+        raise ValueError(f"No existe un cierre guardado para {periodo}.")
+    return _unpack_snapshot(rows[0]["payload"])
+
+
+def storage_save(cfg,periodo,roles,iess,planillas):
+    payload=_pack_snapshot(periodo,roles,iess,planillas)
+    body={"period":periodo,"saved_at":datetime.utcnow().isoformat(timespec="seconds")+"Z","payload":payload}
+    r=requests.post(
+        f"{cfg['url']}/rest/v1/cenase_monthly_closings",
+        headers=_storage_headers(cfg,"resolution=merge-duplicates,return=minimal"),
+        params={"on_conflict":"period"},
+        data=json.dumps(body),
+        timeout=45,
+    )
+    r.raise_for_status()
+
+
+def storage_delete(cfg,periodo):
+    r=requests.delete(
+        f"{cfg['url']}/rest/v1/cenase_monthly_closings",
+        headers=_storage_headers(cfg,"return=minimal"),
+        params={"period":f"eq.{periodo}"},
+        timeout=20,
+    )
+    r.raise_for_status()
+
+
+def infer_period(roles):
+    if roles is None or roles.empty or "Mes" not in roles.columns:
+        return "SIN-PERIODO"
+    vals=roles["Mes"].dropna().astype(str).str.strip()
+    vals=vals[vals.ne("")]
+    return vals.iloc[0] if len(vals) else "SIN-PERIODO"
 
 def norm(x):
     if x is None:
@@ -1058,10 +1187,40 @@ def export_excel(roles,summary,compare,diffs,benefits,planillas,plan_compare,acc
     out.seek(0)
     return out.getvalue()
 
-# ---------- UPLOADS ----------
+# ---------- CARGA / HISTORIAL GUARDADO ----------
+storage_cfg=get_storage_config()
+saved_snapshot=st.session_state.get("cenase_saved_snapshot")
+
 with st.sidebar:
+    st.header("💾 Historial mensual")
+    if storage_cfg:
+        try:
+            saved_rows=storage_list(storage_cfg)
+            saved_periods=[x.get("period","") for x in saved_rows if x.get("period")]
+        except Exception as e:
+            saved_rows=[]; saved_periods=[]
+            st.warning(f"No se pudo consultar el historial: {e}")
+        if saved_periods:
+            sel_saved=st.selectbox("Mes guardado",saved_periods,key="saved_period_select")
+            copen,cnew=st.columns(2)
+            if copen.button("📂 Abrir",use_container_width=True):
+                try:
+                    st.session_state["cenase_saved_snapshot"]=storage_load(storage_cfg,sel_saved)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo abrir {sel_saved}: {e}")
+            if cnew.button("➕ Nueva carga",use_container_width=True):
+                st.session_state.pop("cenase_saved_snapshot",None)
+                st.rerun()
+        else:
+            st.caption("Todavía no hay meses guardados.")
+    else:
+        st.warning("Guardado permanente aún no configurado.")
+        st.caption("La app sigue funcionando con archivos, pero para conservar meses después de reinicios debes configurar Supabase en Streamlit Secrets.")
+
+    st.divider()
     st.header("Carga mensual")
-    st.caption("Sube los 4 archivos del mismo período.")
+    st.caption("Sube los 5 archivos del mismo período.")
     fger=st.file_uploader("1. Rol de Gerentes",type=["xlsx","xls"],key="ger")
     fad=st.file_uploader("2. Rol de Administración",type=["xlsx","xls"],key="adm")
     fop=st.file_uploader("3. Rol de Operativos",type=["xlsx","xls"],key="ope")
@@ -1070,32 +1229,68 @@ with st.sidebar:
     st.divider()
     st.caption("El cruce Rol vs IESS se realiza por cédula.")
 
-if not (fger and fad and fop and fiess and fplan):
-    st.info("Carga los cinco archivos para generar el reporte y la conciliación Rol vs IESS.")
-    st.stop()
-
 try:
-    ger=read_role(fger,"Gerentes")
-    adm=read_role(fad,"Administrativos")
-    ope=read_role(fop,"Operativos")
-    roles=pd.concat([ger,adm,ope],ignore_index=True)
+    saved_snapshot=st.session_state.get("cenase_saved_snapshot")
+    if saved_snapshot:
+        roles=saved_snapshot["roles"].copy()
+        iess=saved_snapshot["iess"].copy()
+        planillas=saved_snapshot["planillas"].copy()
+        data_origin=f"GUARDADO · {saved_snapshot.get('period','')}"
+    else:
+        if not (fger and fad and fop and fiess and fplan):
+            st.info("Carga los cinco archivos o abre un mes guardado para generar el reporte.")
+            st.stop()
+        ger=read_role(fger,"Gerentes")
+        adm=read_role(fad,"Administrativos")
+        ope=read_role(fop,"Operativos")
+        roles=pd.concat([ger,adm,ope],ignore_index=True)
+        iess=read_iess(fiess)
+        planillas=read_planillas(fplan)
+        data_origin="ARCHIVOS CARGADOS"
+
     roles=add_role_employer_calcs(roles)
     dup_mask = roles.duplicated(subset=["Tipo Rol","Mes","Cédula"], keep=False)
     if dup_mask.any():
         st.warning(f"Se detectaron {int(dup_mask.sum())} filas duplicadas. Se conservará una sola fila por trabajador.")
         roles = roles.drop_duplicates(subset=["Tipo Rol","Mes","Cédula"], keep="first").reset_index(drop=True)
-    iess=read_iess(fiess)
+
     comp=make_compare(roles,iess)
     sim_iess=build_iess_simulated_role(roles,iess)
     benefits=build_benefits(roles,iess)
-    planillas=read_planillas(fplan)
     plan_compare=build_iess_plan_compare(iess,planillas)
     accounting=build_accounting(roles,iess,benefits,planillas)
     employer_provision=build_employer_provision(roles,iess)
     payment_accounting=build_payment_accounting(iess,planillas)
 except Exception as e:
-    st.error(f"No pude procesar los archivos: {e}")
+    st.error(f"No pude procesar los datos: {e}")
     st.stop()
+
+# Guardado permanente del período procesado.
+periodo_actual=infer_period(roles)
+with st.sidebar:
+    st.divider()
+    st.subheader("Guardar cierre")
+    st.caption(f"Período detectado: {periodo_actual}")
+    st.caption(f"Origen actual: {data_origin}")
+    if storage_cfg:
+        if st.button("💾 Guardar / actualizar mes",use_container_width=True,type="primary"):
+            try:
+                storage_save(storage_cfg,periodo_actual,roles,iess,planillas)
+                st.success(f"{periodo_actual} guardado permanentemente.")
+            except Exception as e:
+                st.error(f"No se pudo guardar: {e}")
+        if saved_snapshot:
+            confirm_delete=st.checkbox("Confirmo eliminar este mes",key="confirm_delete_month")
+            if st.button("🗑️ Eliminar mes guardado",use_container_width=True,disabled=not confirm_delete):
+                try:
+                    storage_delete(storage_cfg,periodo_actual)
+                    st.session_state.pop("cenase_saved_snapshot",None)
+                    st.success(f"{periodo_actual} eliminado.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo eliminar: {e}")
+    else:
+        st.info("Configura Supabase para habilitar Guardar / Abrir meses.")
 
 # ---------- SUMMARY ----------
 grp=roles.groupby("Tipo Rol",as_index=False).agg(

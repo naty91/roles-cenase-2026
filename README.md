@@ -1,39 +1,44 @@
-# Portal Roles CENASE v13 — Contabilidad corregida
+# Portal Roles CENASE v14 — Guardado permanente
 
-Versión basada en v12, conservando los módulos y descargas PDF e incorporando la lógica contable validada para nómina e IESS.
+Esta versión conserva toda la lógica de v13 y agrega **historial mensual permanente**.
 
-## Pestaña Contabilidad
+## Qué guarda
 
-La APP genera tres asientos independientes:
+Al pulsar **Guardar / actualizar mes**, la aplicación conserva en Supabase los datos procesados de:
 
-1. **Devengo del Rol + beneficios acumulados**
-   - Sueldos, sobretiempos, otros ingresos y beneficios pagados desde los Roles.
-   - Aporte personal, anticipos, préstamos, otros descuentos y Neto a Recibir desde los Roles.
-   - XIII, XIV y Fondo de Reserva acumulados dentro del mismo asiento.
-   - Sueldos por Pagar = Neto a Recibir real del Rol.
+- Roles de Gerentes, Administrativos y Operativos.
+- Consolidado IESS.
+- Reporte de planillas IESS pagadas.
 
-2. **Provisión Patronal IESS + SECAP/IECE**
-   - Patronal desde el Consolidado IESS.
-   - SECAP/IECE desde Valor CCC del Consolidado IESS.
-   - No duplica el aporte personal.
+Al abrir un mes guardado, la app reconstruye automáticamente conciliaciones, beneficios, BI, los tres asientos contables y los PDF/Excel sin volver a cargar los archivos.
 
-3. **Pago de Planillas IESS**
-   - Aporte personal según Consolidado IESS.
-   - Préstamos Quirografarios según DIVPRE pagado.
-   - Patronal y SECAP/IECE según Consolidado.
-   - Fondos de Reserva según lote principal pagado.
-   - IESS por liquidar como diferencia de conciliación contra el total efectivamente pagado.
-   - Haber a 2.1.7.5.7 Otros Impuestos, siguiendo el asiento entregado por CENASE.
+## Configuración única de Supabase
 
-## Patrón enero 2026 validado
+1. Crea un proyecto gratuito en Supabase.
+2. Abre **SQL Editor** y ejecuta el archivo `supabase_setup.sql` incluido en este ZIP.
+3. En Supabase copia:
+   - Project URL.
+   - `service_role` key del proyecto.
+4. En Streamlit Cloud entra a tu app > **Settings > Secrets** y agrega:
 
-- Asiento 1: Debe = Haber = **163,456.82**
-- Asiento 2: Debe = Haber = **16,073.31**
-- Asiento 3: Debe = Haber = **37,931.63**
-- IESS por liquidar: **64.08**
-- Beneficios acumulados validados enero 2026:
-  - XIII: **1,027.40**
-  - XIV: **241.00**
-  - Fondo Reserva: **1,805.01**
+```toml
+[supabase]
+url = "TU_PROJECT_URL"
+service_role_key = "TU_SERVICE_ROLE_KEY"
+```
 
-Para otros meses, la APP mantiene cálculo dinámico con las reglas configuradas.
+No subas esas credenciales a GitHub. Streamlit Secrets las mantiene fuera del repositorio.
+
+## Uso
+
+- Para un mes nuevo: carga los 5 archivos, revisa resultados y pulsa **Guardar / actualizar mes**.
+- Para consultar un mes anterior: selecciónalo en **Historial mensual** y pulsa **Abrir**.
+- Guardar de nuevo el mismo período actualiza ese cierre, no crea duplicados.
+- La eliminación requiere marcar una confirmación explícita.
+
+## Archivos del repositorio
+
+- `app.py`
+- `requirements.txt`
+- `supabase_setup.sql`
+- `README.md`
