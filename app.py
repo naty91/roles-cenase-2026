@@ -24,7 +24,7 @@ div[data-testid="stMetric"]{background:white;border:1px solid #e5eaf0;padding:13
 </style>
 <div class="hero">
 <h1>Reporte Consolidado de Roles + Conciliación IESS</h1>
-<p>Gerentes · Administración · Operativos · IESS | Consulta, diferencias, cuadre y descarga mensual</p>
+<p>Gerentes · Administración · Operativos completos · IESS | Lectura integral, conciliación, beneficios y asiento</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -77,43 +77,51 @@ ALIASES = {
 
 NUMERIC = [c for c in CANONICAL if c not in ["Tipo Rol","Mes","Cédula","Nombre","Fecha Ingreso","Cargo","Puesto / Cliente","Observaciones","Email"]]
 
-def find_role_sheet(f):
-    xls=pd.ExcelFile(f)
-    for s in xls.sheet_names:
-        if norm(s)=="LISTA": return s
-    for s in xls.sheet_names:
-        if "LISTA" in norm(s): return s
-    return xls.sheet_names[0]
+def _file_bytes(f):
+    """Lee el upload completo sin depender de la posición actual del puntero."""
+    if hasattr(f, "getvalue"):
+        return f.getvalue()
+    try:
+        pos=f.tell()
+    except Exception:
+        pos=None
+    try:
+        if hasattr(f,"seek"): f.seek(0)
+        data=f.read()
+    finally:
+        try:
+            if pos is not None: f.seek(pos)
+        except Exception:
+            pass
+    return data
 
-def role_header(raw):
-    for i in range(min(15,len(raw))):
-        vals=[norm(v) for v in raw.iloc[i].tolist()]
-        if "NOMBRE" in vals and any(v in ("C.I","CI","CEDULA") for v in vals) and any(v in ("NETO","NETO A RECIBIR") for v in vals):
-            return i
-    raise ValueError("No se encontró el encabezado del rol.")
-
-def read_role(f,tipo):
-    sheet=find_role_sheet(f)
-    raw=pd.read_excel(f,sheet_name=sheet,header=None,dtype=object)
+def _parse_role_sheet(raw,tipo,sheet_name):
     h=role_header(raw)
     headers=[norm(x) for x in raw.iloc[h].tolist()]
     d=raw.iloc[h+1:].copy()
     d.columns=headers
     d=d.rename(columns={c:ALIASES[norm(c)] for c in d.columns if norm(c) in ALIASES})
 
-    # collapse duplicated columns
+    # Colapsar columnas duplicadas conservando el primer dato no vacío por fila.
     out=pd.DataFrame(index=d.index)
     for c in list(dict.fromkeys(d.columns)):
         sub=d.loc[:,d.columns==c]
         out[c]=sub.bfill(axis=1).iloc[:,0] if sub.shape[1]>1 else sub.iloc[:,0]
     d=out
 
+    if "Cédula" not in d.columns or "Nombre" not in d.columns:
+        raise ValueError(f"La hoja {sheet_name} no contiene Cédula y Nombre.")
+
     d["Cédula"]=d["Cédula"].astype(str).str.replace(r"\.0$","",regex=True).str.strip()
     d["Nombre"]=d["Nombre"].fillna("").astype(str).str.strip()
     d=d[d["Cédula"].str.fullmatch(r"\d{8,13}",na=False)&d["Nombre"].ne("")].copy()
+    if d.empty:
+        return d
+
     d["Tipo Rol"]=tipo
     for c in CANONICAL:
         if c not in d.columns: d[c]=np.nan
+
     d["_Blank XIII"] = d["Décimo Tercero"].isna() | d["Décimo Tercero"].astype(str).str.strip().isin(["", "nan", "None"])
     d["_Blank XIV"] = d["Décimo Cuarto"].isna() | d["Décimo Cuarto"].astype(str).str.strip().isin(["", "nan", "None"])
     d["_Blank FR"] = d["Fondo Reserva"].isna() | d["Fondo Reserva"].astype(str).str.strip().isin(["", "nan", "None"])
@@ -124,8 +132,55 @@ def read_role(f,tipo):
     if tipo=="Operativos":
         d["Cargo"]=d["Cargo"].replace("",np.nan).fillna("Guardia")
     d["Puesto / Cliente"]=d["Puesto / Cliente"].fillna("")
-    return d[CANONICAL + ["_Blank XIII","_Blank XIV","_Blank FR"]].reset_index(drop=True)
+    d["_Hoja Origen"]=sheet_name
+    return d[CANONICAL + ["_Blank XIII","_Blank XIV","_Blank FR","_Hoja Origen"]].reset_index(drop=True)
 
+def role_header(raw):
+    # Buscar más filas porque algunos roles operativos tienen títulos/cabeceras adicionales.
+    for i in range(min(40,len(raw))):
+        vals=[norm(v) for v in raw.iloc[i].tolist()]
+        has_id=any(v in ("C.I","CI","CEDULA") for v in vals)
+        has_name="NOMBRE" in vals
+        has_net=any(v in ("NETO","NETO A RECIBIR") for v in vals)
+        if has_id and has_name and has_net:
+            return i
+    raise ValueError("No se encontró el encabezado del rol.")
+
+def read_role(f,tipo):
+    """Lee TODAS las hojas válidas del archivo de rol y consolida el grupo completo."""
+    data=_file_bytes(f)
+    bio=io.BytesIO(data)
+    xls=pd.ExcelFile(bio)
+    parsed=[]
+    sheets_used=[]
+
+    for sheet in xls.sheet_names:
+        try:
+            raw=pd.read_excel(io.BytesIO(data),sheet_name=sheet,header=None,dtype=object)
+            # Solo aceptar hojas que contienen estructura real de rol.
+            role_header(raw)
+            part=_parse_role_sheet(raw,tipo,sheet)
+            if not part.empty:
+                parsed.append(part)
+                sheets_used.append(sheet)
+        except Exception:
+            continue
+
+    if not parsed:
+        raise ValueError(f"No pude identificar ninguna hoja válida del Rol de {tipo}. Hojas encontradas: {', '.join(xls.sheet_names)}")
+
+    d=pd.concat(parsed,ignore_index=True)
+
+    # Si una misma persona aparece repetida en varias hojas por copia/resumen,
+    # conservar una sola fila cuando TODO el contenido contable sea idéntico.
+    compare_cols=[c for c in CANONICAL if c not in ["Tipo Rol","Observaciones","Email"]]
+    d=d.drop_duplicates(subset=compare_cols,keep="first").copy()
+
+    # Guardar diagnóstico para mostrar exactamente qué leyó la app.
+    d=d.reset_index(drop=True)
+    d.attrs["sheets_used"]=sheets_used
+    d.attrs["source_rows"]=len(d)
+    return d
 
 def period_end(roles):
     for v in roles["Mes"].dropna().astype(str):
@@ -588,7 +643,25 @@ try:
     ger=read_role(fger,"Gerentes")
     adm=read_role(fad,"Administrativos")
     ope=read_role(fop,"Operativos")
+
+    # Validación de integridad: ningún grupo puede quedar vacío.
+    if ger.empty: raise ValueError("El Rol de Gerentes quedó vacío.")
+    if adm.empty: raise ValueError("El Rol de Administración quedó vacío.")
+    if ope.empty: raise ValueError("El Rol de Operativos quedó vacío. Revise que el archivo cargado corresponda al rol operativo.")
+
+    # Detectar archivos/grupos accidentalmente duplicados antes de calcular.
+    def _idset(df): return set(df["Cédula"].dropna().astype(str))
+    if _idset(adm)==_idset(ope) and len(adm)==len(ope):
+        raise ValueError("El Rol de Operativos coincide exactamente con Administración. La app detuvo el cálculo para evitar duplicar Administrativos como Operativos. Revise el archivo de Operativos.")
+
     roles=pd.concat([ger,adm,ope],ignore_index=True)
+
+    # Una misma cédula no debería pertenecer simultáneamente a grupos distintos.
+    cross=roles.groupby("Cédula")["Tipo Rol"].nunique()
+    cross_ids=cross[cross>1].index.tolist()
+    if cross_ids:
+        st.warning(f"Hay {len(cross_ids)} cédula(s) presentes en más de un tipo de rol. Se conservarán en el consolidado, pero deben revisarse: {', '.join(cross_ids[:10])}")
+
     iess=read_iess(fiess)
     comp=make_compare(roles,iess)
     benefits=build_benefits(roles,iess)
@@ -602,10 +675,10 @@ except Exception as e:
 
 # ---------- SUMMARY ----------
 grp=roles.groupby("Tipo Rol",as_index=False).agg(
-    Empleados=("Cédula","count"),Total_Ingresos=("Total Ingresos","sum"),
+    Empleados=("Cédula","nunique"),Total_Ingresos=("Total Ingresos","sum"),
     Total_Egresos=("Total Egresos","sum"),Neto=("Neto a Recibir","sum")
 )
-total=pd.DataFrame([{"Tipo Rol":"TOTAL GENERAL","Empleados":len(roles),
+total=pd.DataFrame([{"Tipo Rol":"TOTAL GENERAL","Empleados":roles["Cédula"].nunique(),
                      "Total_Ingresos":roles["Total Ingresos"].sum(),
                      "Total_Egresos":roles["Total Egresos"].sum(),
                      "Neto":roles["Neto a Recibir"].sum()}])
@@ -615,6 +688,18 @@ summary.columns=["Tipo de Rol","Empleados","Total Ingresos","Total Egresos","Net
 diffs=comp[comp["Estado"]=="REVISAR"].copy()
 missing_role=(comp["Presencia"]=="SOLO IESS").sum()
 missing_iess=(comp["Presencia"]=="SOLO ROL").sum()
+
+st.subheader("✅ Lectura de roles")
+dg1,dg2,dg3=st.columns(3)
+dg1.metric("Gerentes leídos",ger["Cédula"].nunique())
+dg2.metric("Administrativos leídos",adm["Cédula"].nunique())
+dg3.metric("Operativos leídos",ope["Cédula"].nunique())
+st.caption(
+    "Hojas procesadas → "
+    f"Gerentes: {', '.join(ger.attrs.get('sheets_used',[])) or '—'} | "
+    f"Administración: {', '.join(adm.attrs.get('sheets_used',[])) or '—'} | "
+    f"Operativos: {', '.join(ope.attrs.get('sheets_used',[])) or '—'}"
+)
 
 a,b,c,d,e,f=st.columns(6)
 a.metric("Trabajadores Rol",roles["Cédula"].nunique())
@@ -696,7 +781,7 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("Beneficios: pago mensual vs acumulación")
-    st.caption("Base principal: materia gravada IESS. Décimos: valor en rol = pago mensual; vacío = acumula. Fondo de Reserva: fórmula IESS/12 después de 1 año, con Operativos separados de Gerentes/Administrativos.")
+    st.caption("Base principal: materia gravada IESS. Todos los cálculos se ejecutan sobre Gerentes + Administrativos + Operativos completos. Décimos: valor en rol = pago mensual; vacío = acumula. Fondo de Reserva: fórmula IESS/12 después de 1 año, con Operativos separados de Gerentes/Administrativos.")
     bcols=["Tipo Rol","Cédula","Nombre","Fecha Ingreso","Sueldo IESS","Días IESS","XIII Causado","Modalidad XIII","XIII Pagado Rol","XIII Acumulado","XIV Causado","Modalidad XIV","XIV Pagado Rol","XIV Acumulado","Cumple 1 Año FR","Regla FR","Modalidad FR","FR Causado","FR Pagado Rol","FR Acumulado"]
     st.dataframe(benefits[bcols],use_container_width=True,hide_index=True)
 
