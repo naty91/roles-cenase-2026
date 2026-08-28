@@ -23,7 +23,7 @@ div[data-testid="stMetric"]{background:white;border:1px solid #e5eaf0;padding:13
 .small{font-size:.87rem;color:#64748b}
 </style>
 <div class="hero">
-<h1>Reporte Consolidado de Roles + Conciliación IESS · v8</h1>
+<h1>Reporte Consolidado de Roles + Conciliación IESS · v9</h1>
 <p>Gerentes · Administración · Operativos · IESS | Consulta, diferencias, cuadre y descarga mensual</p>
 </div>
 """, unsafe_allow_html=True)
@@ -481,6 +481,25 @@ def build_iess_simulated_role(roles, iess):
     fr_acumula = np.where(s["Tipo Rol"].eq("Operativos"), s["_Blank FR"], s["_Blank FR"] & cumple_ano)
     s["FR Pagado Simulado"] = np.where(fr_acumula, 0.0, s["FR Simulado IESS"])
     s["FR Acumulado Simulado"] = np.where(fr_acumula, s["FR Simulado IESS"], 0.0)
+
+    # Obligaciones acumuladas del Rol Simulado IESS.
+    s["Décimo XIII Acumulado IESS"] = s["XIII Acumulado Simulado"]
+    s["Décimo XIV Acumulado IESS"] = s["XIV Acumulado Simulado"]
+    s["Fondo Reserva Acumulado IESS"] = s["FR Acumulado Simulado"]
+    s["Décimo XIII Pagado IESS"] = s["XIII Pagado Simulado"]
+    s["Décimo XIV Pagado IESS"] = s["XIV Pagado Simulado"]
+    s["Fondo Reserva Pagado IESS"] = s["FR Pagado Simulado"]
+    s["Total Beneficios Acumulados IESS"] = (
+        s["Décimo XIII Acumulado IESS"]
+        + s["Décimo XIV Acumulado IESS"]
+        + s["Fondo Reserva Acumulado IESS"]
+    )
+    s["Total Beneficios Pagados IESS"] = (
+        s["Décimo XIII Pagado IESS"]
+        + s["Décimo XIV Pagado IESS"]
+        + s["Fondo Reserva Pagado IESS"]
+    )
+
     s["Total Ingresos Simulado IESS"] = s["Sueldo IESS"] + s["XIII Pagado Simulado"] + s["XIV Pagado Simulado"] + s["FR Pagado Simulado"] + s["Movilización"]
     s["Total Egresos Simulado IESS"] = s["Individual IESS"] + s["Préstamo Quirografario"] + s["Préstamo Hipotecario"] + s["Anticipos"] + s["Faltas / Pérdida Remuneración"] + s["Otros Egresos"] + s["Multa"] + s["Impuesto Renta"]
     s["Neto Simulado IESS"] = s["Total Ingresos Simulado IESS"] - s["Total Egresos Simulado IESS"]
@@ -810,11 +829,29 @@ with tabs[2]:
         sv=sv[sv["Dif. Neto Rol vs Sim IESS"].abs()>0.05]
     k1,k2,k3,k4=st.columns(4)
     k1.metric("Trabajadores",len(sv)); k2.metric("Neto Rol",fmt_money(sv["Neto a Recibir"].sum())); k3.metric("Neto Simulado IESS",fmt_money(sv["Neto Simulado IESS"].sum())); k4.metric("Diferencia Neto",fmt_money(sv["Dif. Neto Rol vs Sim IESS"].sum()))
-    sim_cols=["Estado Simulación","Tipo Rol","Cédula","Nombre","Cargo","Puesto / Cliente","Días Laborados","Días IESS","Dif. Días Rol vs IESS","Materia Gravada Rol Calc","Sueldo IESS","Dif. Materia Gravada Rol vs IESS","Sueldo Base Simulado IESS","Sobretiempos Rol","Otros Ingresos Gravados Rol","Décimo Tercero","XIII Simulado IESS","XIII Pagado Simulado","XIII Acumulado Simulado","Dif. XIII Rol vs Sim IESS","Décimo Cuarto","XIV Simulado IESS","XIV Pagado Simulado","XIV Acumulado Simulado","Dif. XIV Rol vs Sim IESS","Fondo Reserva","FR Simulado IESS","FR Pagado Simulado","FR Acumulado Simulado","Dif. FR Rol vs Sim IESS","IESS","Individual IESS","Dif. Individual Rol vs IESS","Aporte Patronal Rol Calc 11.15%","Patronal IESS","Dif. Patronal Calc Rol vs IESS","SECAP-IECE Rol Calc 1%","Valor CCC","Dif. SECAP Calc Rol vs IESS","Total Ingresos","Total Ingresos Simulado IESS","Dif. Total Ingresos Rol vs Sim IESS","Total Egresos","Total Egresos Simulado IESS","Dif. Total Egresos Rol vs Sim IESS","Neto a Recibir","Neto Simulado IESS","Dif. Neto Rol vs Sim IESS"]
+    a1,a2,a3,a4=st.columns(4)
+    a1.metric("XIII acumulado IESS",fmt_money(sv["Décimo XIII Acumulado IESS"].sum()))
+    a2.metric("XIV acumulado IESS",fmt_money(sv["Décimo XIV Acumulado IESS"].sum()))
+    a3.metric("F.R. acumulado IESS",fmt_money(sv["Fondo Reserva Acumulado IESS"].sum()))
+    a4.metric("Total acumulado",fmt_money(sv["Total Beneficios Acumulados IESS"].sum()))
+    sim_cols=["Estado Simulación","Tipo Rol","Cédula","Nombre","Cargo","Puesto / Cliente","Días Laborados","Días IESS","Dif. Días Rol vs IESS","Materia Gravada Rol Calc","Sueldo IESS","Dif. Materia Gravada Rol vs IESS","Sueldo Base Simulado IESS","Sobretiempos Rol","Otros Ingresos Gravados Rol","Décimo Tercero","XIII Simulado IESS","Décimo XIII Pagado IESS","Décimo XIII Acumulado IESS","Dif. XIII Rol vs Sim IESS","Décimo Cuarto","XIV Simulado IESS","Décimo XIV Pagado IESS","Décimo XIV Acumulado IESS","Dif. XIV Rol vs Sim IESS","Fondo Reserva","FR Simulado IESS","Fondo Reserva Pagado IESS","Fondo Reserva Acumulado IESS","Total Beneficios Pagados IESS","Total Beneficios Acumulados IESS","Dif. FR Rol vs Sim IESS","IESS","Individual IESS","Dif. Individual Rol vs IESS","Aporte Patronal Rol Calc 11.15%","Patronal IESS","Dif. Patronal Calc Rol vs IESS","SECAP-IECE Rol Calc 1%","Valor CCC","Dif. SECAP Calc Rol vs IESS","Total Ingresos","Total Ingresos Simulado IESS","Dif. Total Ingresos Rol vs Sim IESS","Total Egresos","Total Egresos Simulado IESS","Dif. Total Egresos Rol vs Sim IESS","Neto a Recibir","Neto Simulado IESS","Dif. Neto Rol vs Sim IESS"]
     st.dataframe(sv[sim_cols],use_container_width=True,hide_index=True)
     st.markdown("#### Resumen por grupo")
     sim_summary=sv.groupby("Tipo Rol",as_index=False).agg(Trabajadores=("Cédula","count"),Materia_Gravada_Rol=("Materia Gravada Rol Calc","sum"),Materia_Gravada_IESS=("Sueldo IESS","sum"),Patronal_Rol_Calc=("Aporte Patronal Rol Calc 11.15%","sum"),Patronal_IESS=("Patronal IESS","sum"),SECAP_Rol_Calc=("SECAP-IECE Rol Calc 1%","sum"),CCC_IESS=("Valor CCC","sum"),Neto_Rol=("Neto a Recibir","sum"),Neto_Simulado_IESS=("Neto Simulado IESS","sum"),Diferencia_Neto=("Dif. Neto Rol vs Sim IESS","sum"))
     st.dataframe(sim_summary,use_container_width=True,hide_index=True)
+
+    st.markdown("#### Beneficios pagados vs acumulados por grupo")
+    acum_summary=sv.groupby("Tipo Rol",as_index=False).agg(
+        XIII_Pagado=("Décimo XIII Pagado IESS","sum"),
+        XIII_Acumulado=("Décimo XIII Acumulado IESS","sum"),
+        XIV_Pagado=("Décimo XIV Pagado IESS","sum"),
+        XIV_Acumulado=("Décimo XIV Acumulado IESS","sum"),
+        FR_Pagado=("Fondo Reserva Pagado IESS","sum"),
+        FR_Acumulado=("Fondo Reserva Acumulado IESS","sum"),
+        Total_Beneficios_Pagados=("Total Beneficios Pagados IESS","sum"),
+        Total_Beneficios_Acumulados=("Total Beneficios Acumulados IESS","sum")
+    )
+    st.dataframe(acum_summary,use_container_width=True,hide_index=True)
 
 with tabs[3]:
     st.subheader("Solo registros que requieren revisión")
