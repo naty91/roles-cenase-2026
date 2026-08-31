@@ -490,6 +490,11 @@ def build_benefits(roles, iess):
         b['Fuente Acumulados']='CÁLCULO ROL'
     return b
 
+PLANILLAS_COLUMNS=["Tipo IESS","Total Pagado","Número de planilla","Fecha generación","Fecha pago","Vencimiento","Mes pagado"]
+
+def empty_planillas():
+    return pd.DataFrame(columns=PLANILLAS_COLUMNS)
+
 def read_planillas(f):
     d=pd.read_excel(f,dtype=object)
     d.columns=[str(c).strip() for c in d.columns]
@@ -523,6 +528,8 @@ def read_planillas(f):
     return out
 
 def planillas_summary(plan):
+    if plan is None or plan.empty or "Tipo IESS" not in plan.columns or "Total Pagado" not in plan.columns:
+        return pd.DataFrame(columns=["Tipo IESS","Total Pagado"])
     return plan.groupby("Tipo IESS",as_index=False)["Total Pagado"].sum().sort_values("Tipo IESS")
 
 def build_iess_plan_compare(iess,plan):
@@ -636,12 +643,13 @@ def build_employer_provision(roles,iess):
 def build_payment_accounting(iess,planillas):
     """ASIENTO 3: PAGO REAL DE PLANILLAS IESS.
 
-    El pago se contabiliza por naturaleza del pasivo y el total debe coincidir con las
-    planillas efectivamente pagadas. Para FONDOS, se toma el lote pagado en la fecha
-    principal de pago; pagos complementarios posteriores quedan absorbidos por IESS por
-    liquidar junto con las demás diferencias del pago.
+    Solo se genera cuando existe un Reporte de Planillas IESS Pagadas. Si el archivo
+    todavía no fue cargado, los demás módulos continúan funcionando y este asiento queda
+    pendiente hasta disponer del pago real.
     """
-    total_pago=float(planillas['Total Pagado'].sum()) if planillas is not None and not planillas.empty else 0.0
+    if planillas is None or planillas.empty:
+        return pd.DataFrame(columns=["Asiento","Cuenta","Debe","Haber","Fuente"])
+    total_pago=float(planillas['Total Pagado'].sum())
     individual=float(iess['Individual IESS'].sum())
     patronal=float(iess['Patronal IESS'].sum())
     secap=float(iess['Valor CCC'].sum())
@@ -1506,12 +1514,14 @@ with st.sidebar:
 
     st.divider()
     st.header("Carga mensual")
-    st.caption("Sube los 5 archivos del período. El maestro de cuentas bancarias es opcional para generar pagos.")
+    st.caption("Sube los Roles y el Consolidado IESS para trabajar. El Reporte de Planillas Pagadas y el maestro de cuentas bancarias son opcionales.")
     fger=st.file_uploader("1. Rol de Gerentes",type=["xlsx","xls"],key="ger")
     fad=st.file_uploader("2. Rol de Administración",type=["xlsx","xls"],key="adm")
     fop=st.file_uploader("3. Rol de Operativos",type=["xlsx","xls"],key="ope")
     fiess=st.file_uploader("4. Consolidado IESS",type=["xlsx","xls"],key="iess")
-    fplan=st.file_uploader("5. Reporte de Planillas IESS Pagadas",type=["xlsx"],key="plan")
+    fplan=st.file_uploader("5. Reporte de Planillas IESS Pagadas (opcional)",type=["xlsx"],key="plan")
+    if fplan is None:
+        st.caption("Puedes continuar sin este archivo. Solo quedarán pendientes IESS vs Planillas y el Asiento 3 de pago.")
     fbank=st.file_uploader("6. Maestro de Cuentas Bancarias (opcional)",type=["xlsx","xls"],key="bank_accounts")
     st.divider()
     st.caption("El cruce Rol vs IESS se realiza por cédula.")
@@ -1521,7 +1531,8 @@ try:
     if saved_snapshot:
         roles=saved_snapshot["roles"].copy()
         iess=saved_snapshot["iess"].copy()
-        planillas=saved_snapshot["planillas"].copy()
+        planillas=saved_snapshot.get("planillas")
+        planillas=planillas.copy() if planillas is not None else empty_planillas()
         bank_accounts=saved_snapshot.get("bank_accounts")
         if bank_accounts is not None:
             bank_accounts=bank_accounts.copy()
@@ -1529,15 +1540,15 @@ try:
             bank_accounts=read_bank_accounts(fbank)
         data_origin=f"GUARDADO · {saved_snapshot.get('period','')}"
     else:
-        if not (fger and fad and fop and fiess and fplan):
-            st.info("Carga los cinco archivos o abre un mes guardado para generar el reporte.")
+        if not (fger and fad and fop and fiess):
+            st.info("Carga los tres Roles y el Consolidado IESS, o abre un mes guardado, para generar el reporte. El Reporte de Planillas Pagadas es opcional.")
             st.stop()
         ger=read_role(fger,"Gerentes")
         adm=read_role(fad,"Administrativos")
         ope=read_role(fop,"Operativos")
         roles=pd.concat([ger,adm,ope],ignore_index=True)
         iess=read_iess(fiess)
-        planillas=read_planillas(fplan)
+        planillas=read_planillas(fplan) if fplan is not None else empty_planillas()
         bank_accounts=read_bank_accounts(fbank) if fbank is not None else None
         data_origin="ARCHIVOS CARGADOS"
 
@@ -1736,18 +1747,29 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("IESS vs Planillas Pagadas")
-    st.dataframe(plan_compare,use_container_width=True,hide_index=True)
-    st.markdown("#### Valor contable del pago real")
-    st.info("Prioridad aplicada: 1) el Consolidado IESS aporta los valores reales por trabajador (Patronal, Individual y Valor CCC); 2) el Reporte de Planillas verifica lo efectivamente PAGADO; 3) si Consolidado y Planillas difieren, el PAGO contable usa la planilla real y la diferencia queda visible para revisión. No se recalcula CCC sobre el total de materia gravada.")
-    st.dataframe(payment_accounting,use_container_width=True,hide_index=True)
-    st.markdown("#### Detalle de planillas cargadas")
-    st.dataframe(planillas,use_container_width=True,hide_index=True)
-    pdf_plan=make_pdf_report(f"IESS VS PLANILLAS PAGADAS - {mes_pdf}",[
-        {"title":"Conciliación IESS vs Planillas","df":plan_compare,"max_cols":7},
-        {"title":"Valor contable del pago real","df":payment_accounting,"max_cols":8},
-        {"title":"Detalle de planillas pagadas","df":planillas,"max_cols":7},
-    ],subtitle="Comparación del consolidado IESS con las obligaciones efectivamente pagadas.",page="A3")
-    st.download_button("📄 Descargar IESS vs Planillas en PDF",pdf_plan,file_name=f"IESS_vs_Planillas_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_planillas")
+    if planillas is None or planillas.empty:
+        st.warning("Reporte de Planillas IESS Pagadas no cargado. La APP continúa funcionando normalmente; esta conciliación y el Asiento 3 quedarán pendientes hasta que cargues el archivo.")
+        st.markdown("#### Obligación según Consolidado IESS")
+        iess_pending=pd.DataFrame([
+            {"Concepto":"Aporte Individual","Valor":float(iess['Individual IESS'].sum())},
+            {"Concepto":"Aporte Patronal","Valor":float(iess['Patronal IESS'].sum())},
+            {"Concepto":"SECAP / IECE (CCC)","Valor":float(iess['Valor CCC'].sum())},
+        ])
+        st.dataframe(iess_pending,use_container_width=True,hide_index=True)
+        st.caption("Cuando cargues el reporte de pago, la APP completará automáticamente la comparación y generará el Asiento 3.")
+    else:
+        st.dataframe(plan_compare,use_container_width=True,hide_index=True)
+        st.markdown("#### Valor contable del pago real")
+        st.info("Prioridad aplicada: 1) el Consolidado IESS aporta los valores reales por trabajador (Patronal, Individual y Valor CCC); 2) el Reporte de Planillas verifica lo efectivamente PAGADO; 3) si Consolidado y Planillas difieren, el PAGO contable usa la planilla real y la diferencia queda visible para revisión. No se recalcula CCC sobre el total de materia gravada.")
+        st.dataframe(payment_accounting,use_container_width=True,hide_index=True)
+        st.markdown("#### Detalle de planillas cargadas")
+        st.dataframe(planillas,use_container_width=True,hide_index=True)
+        pdf_plan=make_pdf_report(f"IESS VS PLANILLAS PAGADAS - {mes_pdf}",[
+            {"title":"Conciliación IESS vs Planillas","df":plan_compare,"max_cols":7},
+            {"title":"Valor contable del pago real","df":payment_accounting,"max_cols":8},
+            {"title":"Detalle de planillas pagadas","df":planillas,"max_cols":7},
+        ],subtitle="Comparación del consolidado IESS con las obligaciones efectivamente pagadas.",page="A3")
+        st.download_button("📄 Descargar IESS vs Planillas en PDF",pdf_plan,file_name=f"IESS_vs_Planillas_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_planillas")
 
 with tabs[5]:
     st.subheader("Beneficios: pago mensual vs acumulación")
@@ -1797,21 +1819,26 @@ with tabs[6]:
 
     # ----- ASIENTO 3 -----
     st.markdown("### 3️⃣ Asiento 3 — Pago de Planillas IESS")
-    st.caption("Fuente: Consolidado IESS + reporte de planillas efectivamente pagadas. El asiento cruza los pasivos y cuadra exactamente contra el total pagado.")
-    st.dataframe(payment_accounting,use_container_width=True,hide_index=True)
-    a3d=float(payment_accounting['Debe'].sum()); a3h=float(payment_accounting['Haber'].sum()); a3dif=round(a3d-a3h,2)
-    c1,c2,c3=st.columns(3)
-    c1.metric("Total Debe",fmt_money(a3d)); c2.metric("Total Haber",fmt_money(a3h)); c3.metric("Diferencia",fmt_money(a3dif))
-    if abs(a3dif)<=0.05: st.success("ASIENTO 3 CUADRADO ✓")
-    else: st.error("ASIENTO 3 NO CUADRA. Revisar planillas pagadas / IESS por liquidar.")
-    st.caption(f"Glosa: P/R ASIENTO PAGO DE IESS CORRESPONDIENTE AL PERÍODO {mes_pdf}.")
+    if planillas is None or planillas.empty:
+        st.warning("PENDIENTE: no se cargó el Reporte de Planillas IESS Pagadas. Los Asientos 1 y 2 sí están completos; el Asiento 3 se generará cuando exista el pago real.")
+        st.caption("No se crea ningún asiento de pago estimado ni se fuerza un valor contra Banco sin el reporte pagado.")
+        plan_compare_display=plan_compare
+        liq=0.0
+    else:
+        st.caption("Fuente: Consolidado IESS + reporte de planillas efectivamente pagadas. El asiento cruza los pasivos y cuadra exactamente contra el total pagado.")
+        st.dataframe(payment_accounting,use_container_width=True,hide_index=True)
+        a3d=float(payment_accounting['Debe'].sum()); a3h=float(payment_accounting['Haber'].sum()); a3dif=round(a3d-a3h,2)
+        c1,c2,c3=st.columns(3)
+        c1.metric("Total Debe",fmt_money(a3d)); c2.metric("Total Haber",fmt_money(a3h)); c3.metric("Diferencia",fmt_money(a3dif))
+        if abs(a3dif)<=0.05: st.success("ASIENTO 3 CUADRADO ✓")
+        else: st.error("ASIENTO 3 NO CUADRA. Revisar planillas pagadas / IESS por liquidar.")
+        st.caption(f"Glosa: P/R ASIENTO PAGO DE IESS CORRESPONDIENTE AL PERÍODO {mes_pdf}.")
 
-    # Conciliación que explica el pago sin alterar los asientos.
-    st.markdown("#### Conciliación de control — Consolidado vs Planillas pagadas")
-    st.dataframe(plan_compare,use_container_width=True,hide_index=True)
-    liq=float(payment_accounting.loc[payment_accounting['Cuenta'].str.contains('IESS por liquidar',case=False,na=False),'Debe'].sum()-payment_accounting.loc[payment_accounting['Cuenta'].str.contains('IESS por liquidar',case=False,na=False),'Haber'].sum())
-    st.metric("IESS por liquidar del pago",fmt_money(liq))
-    st.caption("IESS por liquidar representa la diferencia necesaria para que el cruce de pasivos coincida con el pago real. Debe revisarse contra planillas complementarias, extensiones, juveniles u otros movimientos del período.")
+        st.markdown("#### Conciliación de control — Consolidado vs Planillas pagadas")
+        st.dataframe(plan_compare,use_container_width=True,hide_index=True)
+        liq=float(payment_accounting.loc[payment_accounting['Cuenta'].str.contains('IESS por liquidar',case=False,na=False),'Debe'].sum()-payment_accounting.loc[payment_accounting['Cuenta'].str.contains('IESS por liquidar',case=False,na=False),'Haber'].sum())
+        st.metric("IESS por liquidar del pago",fmt_money(liq))
+        st.caption("IESS por liquidar representa la diferencia necesaria para que el cruce de pasivos coincida con el pago real. Debe revisarse contra planillas complementarias, extensiones, juveniles u otros movimientos del período.")
 
     cont_sections=[
         {"title":"ASIENTO 1 - Rol + beneficios acumulados","df":accounting,"max_cols":8},
@@ -1820,7 +1847,7 @@ with tabs[6]:
         {"title":"ASIENTO 3 - Pago de planillas IESS","df":payment_accounting,"max_cols":8},
         {"title":"Conciliación Consolidado vs Planillas","df":plan_compare,"max_cols":8},
     ]
-    pdf_cont=make_pdf_report(f"CONTABILIDAD DE NÓMINA - {mes_pdf}",cont_sections,subtitle="Tres asientos separados: Rol + acumulados, provisión patronal y pago IESS.",page="A3")
+    pdf_cont=make_pdf_report(f"CONTABILIDAD DE NÓMINA - {mes_pdf}",cont_sections,subtitle=("Tres asientos separados: Rol + acumulados, provisión patronal y pago IESS." if planillas is not None and not planillas.empty else "Asientos 1 y 2 completos. Asiento 3 pendiente por falta del Reporte de Planillas Pagadas."),page="A3")
     st.download_button("📄 Descargar Contabilidad en PDF",pdf_cont,file_name=f"Contabilidad_Nomina_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_contabilidad")
 
 with tabs[7]:
@@ -1886,7 +1913,7 @@ full_pdf=make_pdf_report(f"REPORTE MENSUAL ROLES + IESS - {mes_pdf}",[
     {"title":"Rol vs IESS - diferencias","df":diffs.drop(columns=["_merge"],errors="ignore"),"keys":["Tipo Rol","Cédula","Nombre"],"max_cols":7},
     {"title":"IESS vs Planillas","df":plan_compare,"max_cols":7},
     {"title":"Asiento contable propuesto","df":accounting,"max_cols":8},
-],subtitle="Reporte mensual integral de nómina, conciliación IESS, planillas y contabilidad.",page="A3")
+],subtitle=("Reporte mensual integral de nómina, conciliación IESS, planillas y contabilidad." if planillas is not None and not planillas.empty else "Reporte mensual de nómina e IESS. Conciliación de planillas y Asiento 3 pendientes."),page="A3")
 d2.download_button("📄 Descargar reporte mensual completo (PDF)",
                    data=full_pdf,file_name=f"Reporte_Mensual_Roles_IESS_{mes_pdf}.pdf",
                    mime="application/pdf",use_container_width=True)

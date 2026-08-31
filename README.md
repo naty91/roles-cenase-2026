@@ -77,3 +77,6 @@ No subas esas credenciales a GitHub. Streamlit Secrets las mantiene fuera del re
 - VALOR A PAGAR se exporta en centavos, sin comas ni puntos.
 - Ejemplo: $230.45 se genera como `23045`.
 - El total visible en la APP continúa mostrándose en dólares.
+
+## v21 — Reporte de Planillas IESS opcional
+La aplicación puede procesar el mes con los tres Roles y el Consolidado IESS aunque todavía no se haya cargado el Reporte de Planillas IESS Pagadas. En ese caso continúan funcionando Rol, Rol vs IESS, simulador, diferencias, beneficios, Asientos 1 y 2, consulta, cuadre, BI y pagos bancarios. El módulo IESS vs Planillas y el Asiento 3 quedan marcados como pendientes hasta cargar el reporte real de pagos; no se inventa ni estima un pago bancario.
