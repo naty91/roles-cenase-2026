@@ -72,3 +72,8 @@ No subas esas credenciales a GitHub. Streamlit Secrets las mantiene fuera del re
 - También genera TXT tabulado sin encabezado y sin PUESTO para carga bancaria.
 - Reporta trabajadores del Rol que no tengan cuenta bancaria identificada.
 - Las cuentas bancarias pueden quedar guardadas junto con el cierre mensual en Supabase.
+
+## v20 – Formato bancario VALOR A PAGAR
+- VALOR A PAGAR se exporta en centavos, sin comas ni puntos.
+- Ejemplo: $230.45 se genera como `23045`.
+- El total visible en la APP continúa mostrándose en dólares.

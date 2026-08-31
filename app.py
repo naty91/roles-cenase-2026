@@ -343,7 +343,7 @@ def build_bank_payment(roles, bank_accounts, client_id="", reference=""):
         "INSTRUCCIÓN":"PA",
         "IDENT. CLIENTE":str(client_id).strip(),
         "TPO MONEDA":"USD",
-        "VALOR A PAGAR":ok["Neto a Recibir"].round(2),
+        "VALOR A PAGAR":(ok["Neto a Recibir"].round(2)*100).round().astype("int64"),
         "FORMA DE PAGO":"CTA",
         "TIPO CUENTA":ok["Tipo Cuenta"],
         "NUMERO DE CTA":ok["Número Cuenta"],
@@ -365,7 +365,7 @@ def export_bank_payment_excel(bank_df, period):
         wb=writer.book; ws=writer.sheets["PAGOS"]
         fmt_num=wb.add_format({"bold":True,"align":"center","border":1,"bg_color":"#D9E4F0"})
         fmt_head=wb.add_format({"bold":True,"align":"center","valign":"vcenter","border":1,"bg_color":"#FFFF00","text_wrap":True})
-        fmt_money=wb.add_format({"num_format":"0.00","border":1})
+        fmt_money=wb.add_format({"num_format":"0","border":1})
         fmt_text=wb.add_format({"border":1})
         for j in range(len(bank_df.columns)):
             ws.write(0,j,j+1,fmt_num)
@@ -387,13 +387,13 @@ def export_bank_payment_txt(bank_df):
     """Archivo tabulado para banco, excluyendo la columna interna PUESTO y el encabezado."""
     bank_cols=["INSTRUCCIÓN","IDENT. CLIENTE","TPO MONEDA","VALOR A PAGAR","FORMA DE PAGO","TIPO CUENTA","NUMERO DE CTA","REFERENCIA","TIPO DE IDENTIFICACION","NUM. ID","NOMBRE","COD. BCO"]
     x=bank_df[bank_cols].copy()
-    # Evita notación científica y mantiene dos decimales en el monto.
+    # El banco exige centavos sin coma ni punto: 230.45 -> 23045.
     lines=[]
     for _,row in x.iterrows():
         vals=[]
         for c in bank_cols:
             v=row[c]
-            vals.append(f"{float(v):.2f}" if c=="VALOR A PAGAR" else str(v))
+            vals.append(str(int(round(float(v)))) if c=="VALOR A PAGAR" else str(v))
         lines.append("\t".join(vals))
     return ("\n".join(lines)).encode("utf-8")
 
@@ -1942,7 +1942,7 @@ with tabs[9]:
 
 with tabs[10]:
     st.subheader("💵 Plantilla de pago de nómina al banco")
-    st.caption("Cruza por cédula el maestro bancario con el Rol y utiliza exactamente el Neto a Recibir como VALOR A PAGAR.")
+    st.caption("Cruza por cédula el maestro bancario con el Rol. VALOR A PAGAR se exporta en centavos, sin comas ni puntos: $230.45 → 23045.")
     if bank_accounts is None or bank_accounts.empty:
         st.info("Carga el archivo 'CUENTAS BANCARIAS' en la barra lateral para generar la plantilla bancaria.")
     else:
@@ -1954,7 +1954,7 @@ with tabs[10]:
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric("Trabajadores a pagar",len(bank_df))
-        k2.metric("Total neto a pagar",fmt_money(bank_df["VALOR A PAGAR"].sum() if len(bank_df) else 0))
+        k2.metric("Total neto a pagar",fmt_money((bank_df["VALOR A PAGAR"].sum()/100) if len(bank_df) else 0))
         k3.metric("Sin cuenta bancaria",len(bank_missing))
         k4.metric("Neto total del Rol",fmt_money(roles["Neto a Recibir"].sum()))
 
@@ -1962,7 +1962,7 @@ with tabs[10]:
             st.warning("Completa IDENT. CLIENTE antes de usar el archivo para carga bancaria.")
 
         st.markdown("#### Vista previa")
-        st.dataframe(bank_df,use_container_width=True,hide_index=True,column_config={"VALOR A PAGAR":st.column_config.NumberColumn(format="$ %.2f")})
+        st.dataframe(bank_df,use_container_width=True,hide_index=True,column_config={"VALOR A PAGAR":st.column_config.NumberColumn(format="%d", help="Centavos sin coma ni punto. Ej.: $230.45 = 23045")})
 
         if len(bank_missing):
             st.markdown("#### ⚠️ Trabajadores sin cuenta bancaria identificada")
