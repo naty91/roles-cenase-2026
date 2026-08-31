@@ -34,7 +34,7 @@ div[data-testid="stMetric"]{background:white;border:1px solid #e5eaf0;padding:13
 .small{font-size:.87rem;color:#64748b}
 </style>
 <div class="hero">
-<h1>Reporte Consolidado de Roles + Conciliación IESS · v17</h1>
+<h1>Reporte Consolidado de Roles + Conciliación IESS · v19</h1>
 <p>Gerentes · Administración · Operativos · IESS | Consulta, diferencias, cuadre y descarga mensual</p>
 </div>
 """, unsafe_allow_html=True)
@@ -83,14 +83,15 @@ def _df_from_json(txt):
     return d
 
 
-def _pack_snapshot(periodo,roles,iess,planillas):
+def _pack_snapshot(periodo,roles,iess,planillas,bank_accounts=None):
     obj={
-        "schema_version":1,
+        "schema_version":2,
         "period":periodo,
         "saved_at":datetime.now().isoformat(timespec="seconds"),
         "roles":_df_to_json(roles),
         "iess":_df_to_json(iess),
         "planillas":_df_to_json(planillas),
+        "bank_accounts":_df_to_json(bank_accounts) if bank_accounts is not None else None,
     }
     raw=json.dumps(obj,ensure_ascii=False,separators=(",",":")).encode("utf-8")
     return base64.b64encode(gzip.compress(raw,compresslevel=9)).decode("ascii")
@@ -105,6 +106,7 @@ def _unpack_snapshot(payload):
         "roles":_df_from_json(obj["roles"]),
         "iess":_df_from_json(obj["iess"]),
         "planillas":_df_from_json(obj["planillas"]),
+        "bank_accounts":_df_from_json(obj["bank_accounts"]) if obj.get("bank_accounts") else None,
     }
 
 
@@ -133,8 +135,8 @@ def storage_load(cfg,periodo):
     return _unpack_snapshot(rows[0]["payload"])
 
 
-def storage_save(cfg,periodo,roles,iess,planillas):
-    payload=_pack_snapshot(periodo,roles,iess,planillas)
+def storage_save(cfg,periodo,roles,iess,planillas,bank_accounts=None):
+    payload=_pack_snapshot(periodo,roles,iess,planillas,bank_accounts)
     body={"period":periodo,"saved_at":datetime.utcnow().isoformat(timespec="seconds")+"Z","payload":payload}
     r=requests.post(
         f"{cfg['url']}/rest/v1/cenase_monthly_closings",
@@ -292,6 +294,109 @@ def read_role(f,tipo):
     )
 
     return d[CANONICAL + ["_Blank XIII","_Blank XIV","_Blank FR","_Hoja Origen"]].reset_index(drop=True)
+
+def read_bank_accounts(f):
+    """Lee el maestro de cuentas bancarias y normaliza los campos para el cruce por cédula."""
+    raw=pd.read_excel(f, sheet_name=0, dtype=object)
+    raw.columns=[norm(c) for c in raw.columns]
+    aliases={
+        "IDENT. CLIENTE":"Cédula","IDENT CLIENTE":"Cédula","CEDULA":"Cédula","CI":"Cédula","C.I":"Cédula",
+        "TIPO CUENTA":"Tipo Cuenta","NUMERO DE CTA":"Número Cuenta","NUMERO DE CTA.":"Número Cuenta","NUMERO CTA":"Número Cuenta",
+        "NOMBRE":"Nombre Banco","COD. BCO":"Código Banco","COD BCO":"Código Banco","BANCO":"Banco",
+        "PUESTO":"Puesto Banco","TIPO DE PUESTO":"Tipo Puesto",
+    }
+    d=raw.rename(columns={c:aliases.get(c,c) for c in raw.columns}).copy()
+    required=["Cédula","Tipo Cuenta","Número Cuenta","Nombre Banco","Código Banco"]
+    missing=[c for c in required if c not in d.columns]
+    if missing:
+        raise ValueError("El archivo de cuentas bancarias no contiene: "+", ".join(missing))
+    for c in ["Puesto Banco","Tipo Puesto","Banco"]:
+        if c not in d.columns:
+            d[c]=""
+    d["Cédula"]=d["Cédula"].apply(normalize_ci)
+    d["Tipo Cuenta"]=d["Tipo Cuenta"].fillna("").astype(str).str.strip().str.upper()
+    d["Número Cuenta"]=d["Número Cuenta"].apply(lambda x: "" if pd.isna(x) else re.sub(r"\.0$","",str(x).strip()))
+    d["Nombre Banco"]=d["Nombre Banco"].fillna("").astype(str).str.strip()
+    d["Código Banco"]=d["Código Banco"].apply(lambda x: "" if pd.isna(x) else re.sub(r"\.0$","",str(x).strip()))
+    d["Banco"]=d["Banco"].fillna("").astype(str).str.strip()
+    d["Puesto Banco"]=d["Puesto Banco"].fillna("").astype(str).str.strip()
+    d["Tipo Puesto"]=d["Tipo Puesto"].fillna("").astype(str).str.strip()
+    d=d[d["Cédula"].str.fullmatch(r"\d{8,13}",na=False)].copy()
+    d=d.drop_duplicates(subset=["Cédula"],keep="first").reset_index(drop=True)
+    return d[["Cédula","Tipo Cuenta","Número Cuenta","Nombre Banco","Código Banco","Banco","Puesto Banco","Tipo Puesto"]]
+
+
+def build_bank_payment(roles, bank_accounts, client_id="", reference=""):
+    """Cruza el neto del Rol con el maestro bancario y arma la estructura de pago masivo."""
+    if bank_accounts is None or bank_accounts.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    r=roles[["Cédula","Nombre","Tipo Rol","Puesto / Cliente","Neto a Recibir"]].copy()
+    r=r.groupby("Cédula",as_index=False).agg({
+        "Nombre":"first","Tipo Rol":"first","Puesto / Cliente":"first","Neto a Recibir":"sum"
+    })
+    m=r.merge(bank_accounts,on="Cédula",how="left",indicator=True)
+    m["PUESTO"]=m["Puesto Banco"].where(m["Puesto Banco"].astype(str).str.strip().ne(""),m["Puesto / Cliente"])
+    m["NOMBRE PAGO"]=m["Nombre Banco"].where(m["Nombre Banco"].astype(str).str.strip().ne(""),m["Nombre"])
+    missing=m[(m["_merge"]!="both") | m["Número Cuenta"].fillna("").astype(str).str.strip().eq("")].copy()
+    ok=m[(m["_merge"]=="both") & m["Número Cuenta"].fillna("").astype(str).str.strip().ne("") & (m["Neto a Recibir"]>0.005)].copy()
+    out=pd.DataFrame({
+        "INSTRUCCIÓN":"PA",
+        "IDENT. CLIENTE":str(client_id).strip(),
+        "TPO MONEDA":"USD",
+        "VALOR A PAGAR":ok["Neto a Recibir"].round(2),
+        "FORMA DE PAGO":"CTA",
+        "TIPO CUENTA":ok["Tipo Cuenta"],
+        "NUMERO DE CTA":ok["Número Cuenta"],
+        "REFERENCIA":str(reference).strip(),
+        "TIPO DE IDENTIFICACION":"C",
+        "NUM. ID":ok["Cédula"],
+        "NOMBRE":ok["NOMBRE PAGO"],
+        "COD. BCO":ok["Código Banco"],
+        "PUESTO":ok["PUESTO"],
+    })
+    return out.reset_index(drop=True), missing.reset_index(drop=True)
+
+
+def export_bank_payment_excel(bank_df, period):
+    """Excel de control: replica la plantilla bancaria y añade PUESTO como última columna."""
+    out=io.BytesIO()
+    with pd.ExcelWriter(out,engine="xlsxwriter") as writer:
+        bank_df.to_excel(writer,sheet_name="PAGOS",index=False,startrow=1)
+        wb=writer.book; ws=writer.sheets["PAGOS"]
+        fmt_num=wb.add_format({"bold":True,"align":"center","border":1,"bg_color":"#D9E4F0"})
+        fmt_head=wb.add_format({"bold":True,"align":"center","valign":"vcenter","border":1,"bg_color":"#FFFF00","text_wrap":True})
+        fmt_money=wb.add_format({"num_format":"0.00","border":1})
+        fmt_text=wb.add_format({"border":1})
+        for j in range(len(bank_df.columns)):
+            ws.write(0,j,j+1,fmt_num)
+            ws.write(1,j,bank_df.columns[j],fmt_head)
+        if len(bank_df):
+            for j,c in enumerate(bank_df.columns):
+                ws.set_column(j,j,18,fmt_money if c=="VALOR A PAGAR" else fmt_text)
+        widths={0:13,1:16,2:13,3:16,4:16,5:14,6:20,7:27,8:22,9:16,10:34,11:12,12:30}
+        for j,w in widths.items(): ws.set_column(j,j,w)
+        ws.set_row(1,38)
+        ws.freeze_panes(2,0)
+        ws.autofilter(1,0,1+len(bank_df),len(bank_df.columns)-1)
+        ws.write(3+len(bank_df),0,f"CONTROL CENASE · NETO A PAGAR DEL ROL · {period}",wb.add_format({"bold":True}))
+    out.seek(0)
+    return out.getvalue()
+
+
+def export_bank_payment_txt(bank_df):
+    """Archivo tabulado para banco, excluyendo la columna interna PUESTO y el encabezado."""
+    bank_cols=["INSTRUCCIÓN","IDENT. CLIENTE","TPO MONEDA","VALOR A PAGAR","FORMA DE PAGO","TIPO CUENTA","NUMERO DE CTA","REFERENCIA","TIPO DE IDENTIFICACION","NUM. ID","NOMBRE","COD. BCO"]
+    x=bank_df[bank_cols].copy()
+    # Evita notación científica y mantiene dos decimales en el monto.
+    lines=[]
+    for _,row in x.iterrows():
+        vals=[]
+        for c in bank_cols:
+            v=row[c]
+            vals.append(f"{float(v):.2f}" if c=="VALOR A PAGAR" else str(v))
+        lines.append("\t".join(vals))
+    return ("\n".join(lines)).encode("utf-8")
+
 
 def period_end(roles):
     for v in roles["Mes"].dropna().astype(str):
@@ -1401,12 +1506,13 @@ with st.sidebar:
 
     st.divider()
     st.header("Carga mensual")
-    st.caption("Sube los 5 archivos del mismo período.")
+    st.caption("Sube los 5 archivos del período. El maestro de cuentas bancarias es opcional para generar pagos.")
     fger=st.file_uploader("1. Rol de Gerentes",type=["xlsx","xls"],key="ger")
     fad=st.file_uploader("2. Rol de Administración",type=["xlsx","xls"],key="adm")
     fop=st.file_uploader("3. Rol de Operativos",type=["xlsx","xls"],key="ope")
     fiess=st.file_uploader("4. Consolidado IESS",type=["xlsx","xls"],key="iess")
     fplan=st.file_uploader("5. Reporte de Planillas IESS Pagadas",type=["xlsx"],key="plan")
+    fbank=st.file_uploader("6. Maestro de Cuentas Bancarias (opcional)",type=["xlsx","xls"],key="bank_accounts")
     st.divider()
     st.caption("El cruce Rol vs IESS se realiza por cédula.")
 
@@ -1416,6 +1522,11 @@ try:
         roles=saved_snapshot["roles"].copy()
         iess=saved_snapshot["iess"].copy()
         planillas=saved_snapshot["planillas"].copy()
+        bank_accounts=saved_snapshot.get("bank_accounts")
+        if bank_accounts is not None:
+            bank_accounts=bank_accounts.copy()
+        if fbank is not None:
+            bank_accounts=read_bank_accounts(fbank)
         data_origin=f"GUARDADO · {saved_snapshot.get('period','')}"
     else:
         if not (fger and fad and fop and fiess and fplan):
@@ -1427,6 +1538,7 @@ try:
         roles=pd.concat([ger,adm,ope],ignore_index=True)
         iess=read_iess(fiess)
         planillas=read_planillas(fplan)
+        bank_accounts=read_bank_accounts(fbank) if fbank is not None else None
         data_origin="ARCHIVOS CARGADOS"
 
     roles=add_role_employer_calcs(roles)
@@ -1456,7 +1568,7 @@ with st.sidebar:
     if storage_cfg:
         if st.button("💾 Guardar / actualizar mes",use_container_width=True,type="primary"):
             try:
-                storage_save(storage_cfg,periodo_actual,roles,iess,planillas)
+                storage_save(storage_cfg,periodo_actual,roles,iess,planillas,bank_accounts)
                 st.success(f"{periodo_actual} guardado permanentemente.")
             except Exception as e:
                 st.error(f"No se pudo guardar: {e}")
@@ -1501,7 +1613,7 @@ f.metric("Neto Roles",fmt_money(roles["Neto a Recibir"].sum()))
 mes_pdf=roles["Mes"].dropna().astype(str)
 mes_pdf=mes_pdf.iloc[0] if len(mes_pdf) else datetime.now().strftime("%Y-%m")
 
-tabs=st.tabs(["📊 Resumen Roles","🏛️ Rol vs IESS","🧮 Rol Simulado IESS","⚠️ Diferencias","💳 IESS vs Planillas","🎁 Beneficios","🧾 Contabilidad","🔎 Consulta Roles","✅ Cuadre","🚦 Diferencias Simplificado"])
+tabs=st.tabs(["📊 Resumen Roles","🏛️ Rol vs IESS","🧮 Rol Simulado IESS","⚠️ Diferencias","💳 IESS vs Planillas","🎁 Beneficios","🧾 Contabilidad","🔎 Consulta Roles","✅ Cuadre","🚦 Diferencias Simplificado","💵 Pagos Bancarios"])
 
 with tabs[0]:
     show=summary.copy()
@@ -1827,4 +1939,40 @@ with tabs[9]:
     st.info("En acumulados, el lado Rol y el lado IESS se calculan de forma independiente. Por eso una diferencia $0,00 significa que realmente cuadran, no que se está comparando IESS contra sí mismo.")
     pdf_bi=make_bi_pdf(ds1,ds2,ds3,ds4,ds5,ds6,mes_pdf)
     st.download_button("📄 Descargar Reporte BI en PDF",pdf_bi,file_name=f"Reporte_BI_Diferencias_{mes_pdf}.pdf",mime="application/pdf",use_container_width=True,key="pdf_bi")
+
+with tabs[10]:
+    st.subheader("💵 Plantilla de pago de nómina al banco")
+    st.caption("Cruza por cédula el maestro bancario con el Rol y utiliza exactamente el Neto a Recibir como VALOR A PAGAR.")
+    if bank_accounts is None or bank_accounts.empty:
+        st.info("Carga el archivo 'CUENTAS BANCARIAS' en la barra lateral para generar la plantilla bancaria.")
+    else:
+        c1,c2=st.columns(2)
+        client_id=c1.text_input("IDENT. CLIENTE",value="",help="Código/identificación del cliente pagador solicitado por el banco. No se completa automáticamente para evitar usar un dato incorrecto.")
+        default_ref=f"PAGO ROL {mes_pdf}"
+        reference=c2.text_input("REFERENCIA",value=default_ref)
+        bank_df, bank_missing=build_bank_payment(roles,bank_accounts,client_id,reference)
+
+        k1,k2,k3,k4=st.columns(4)
+        k1.metric("Trabajadores a pagar",len(bank_df))
+        k2.metric("Total neto a pagar",fmt_money(bank_df["VALOR A PAGAR"].sum() if len(bank_df) else 0))
+        k3.metric("Sin cuenta bancaria",len(bank_missing))
+        k4.metric("Neto total del Rol",fmt_money(roles["Neto a Recibir"].sum()))
+
+        if not str(client_id).strip():
+            st.warning("Completa IDENT. CLIENTE antes de usar el archivo para carga bancaria.")
+
+        st.markdown("#### Vista previa")
+        st.dataframe(bank_df,use_container_width=True,hide_index=True,column_config={"VALOR A PAGAR":st.column_config.NumberColumn(format="$ %.2f")})
+
+        if len(bank_missing):
+            st.markdown("#### ⚠️ Trabajadores sin cuenta bancaria identificada")
+            miss_show=bank_missing[["Cédula","Nombre","Tipo Rol","Puesto / Cliente","Neto a Recibir"]].copy()
+            st.dataframe(miss_show,use_container_width=True,hide_index=True)
+
+        dx1,dx2=st.columns(2)
+        excel_bank=export_bank_payment_excel(bank_df,mes_pdf)
+        dx1.download_button("⬇️ Descargar plantilla bancaria en Excel",excel_bank,file_name=f"Pago_Rol_Banco_{mes_pdf}.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="bank_excel")
+        txt_bank=export_bank_payment_txt(bank_df)
+        dx2.download_button("⬇️ Descargar TXT tabulado para banco",txt_bank,file_name=f"Pago_Rol_Banco_{mes_pdf}.txt",mime="text/plain",use_container_width=True,key="bank_txt")
+        st.caption("El Excel incluye la columna PUESTO para control interno. El TXT excluye PUESTO y encabezados para mantener la estructura de carga bancaria.")
 

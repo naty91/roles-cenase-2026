@@ -61,3 +61,14 @@ No subas esas credenciales a GitHub. Streamlit Secrets las mantiene fuera del re
 - Tipografía de tablas aumentada.
 - Márgenes reducidos para aprovechar el ancho completo.
 - Mantiene Ingresos, Egresos, Beneficios pagados y Beneficios acumulados en una sola hoja horizontal cuando el contenido lo permite.
+
+## v19 - Plantilla bancaria de nómina
+- Nuevo módulo **Pagos Bancarios**.
+- Carga opcional del maestro **CUENTAS BANCARIAS**.
+- Cruce automático por cédula con el Rol.
+- **VALOR A PAGAR = Neto a Recibir** del Rol.
+- Genera la estructura: INSTRUCCIÓN, IDENT. CLIENTE, TPO MONEDA, VALOR A PAGAR, FORMA DE PAGO, TIPO CUENTA, NUMERO DE CTA, REFERENCIA, TIPO DE IDENTIFICACION, NUM. ID, NOMBRE, COD. BCO.
+- El Excel añade **PUESTO** como última columna para control interno del guardia.
+- También genera TXT tabulado sin encabezado y sin PUESTO para carga bancaria.
+- Reporta trabajadores del Rol que no tengan cuenta bancaria identificada.
+- Las cuentas bancarias pueden quedar guardadas junto con el cierre mensual en Supabase.
