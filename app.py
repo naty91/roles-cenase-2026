@@ -383,6 +383,49 @@ def export_bank_payment_excel(bank_df, period):
     return out.getvalue()
 
 
+def build_cheque_payment_report(bank_missing):
+    """Arma el reporte de trabajadores que deben pagarse mediante cheque por no tener cuenta bancaria."""
+    cols=["Cédula","Nombre","Tipo Rol","Puesto / Cliente","Neto a Recibir"]
+    if bank_missing is None or bank_missing.empty:
+        return pd.DataFrame(columns=["Cédula","Nombre","Tipo Rol","Puesto / Cliente","FORMA DE PAGO","VALOR A PAGAR"])
+    d=bank_missing[cols].copy()
+    d["Neto a Recibir"]=as_num(d["Neto a Recibir"])
+    d=d[d["Neto a Recibir"]>0.005].copy()
+    d["FORMA DE PAGO"]="CHEQUE"
+    d["VALOR A PAGAR"]=d["Neto a Recibir"].round(2)
+    return d[["Cédula","Nombre","Tipo Rol","Puesto / Cliente","FORMA DE PAGO","VALOR A PAGAR"]].reset_index(drop=True)
+
+
+def export_cheque_payment_excel(cheque_df, period):
+    """Excel de control para trabajadores sin cuenta bancaria, cuyo pago se realiza mediante cheque."""
+    out=io.BytesIO()
+    with pd.ExcelWriter(out,engine="xlsxwriter") as writer:
+        cheque_df.to_excel(writer,sheet_name="PAGOS EN CHEQUE",index=False,startrow=2)
+        wb=writer.book; ws=writer.sheets["PAGOS EN CHEQUE"]
+        fmt_title=wb.add_format({"bold":True,"font_size":14,"align":"center","valign":"vcenter"})
+        fmt_head=wb.add_format({"bold":True,"align":"center","valign":"vcenter","border":1,"bg_color":"#D9E4F0","text_wrap":True})
+        fmt_text=wb.add_format({"border":1})
+        fmt_money=wb.add_format({"num_format":"$#,##0.00","border":1})
+        fmt_total=wb.add_format({"bold":True,"num_format":"$#,##0.00","border":1})
+        ws.merge_range(0,0,0,len(cheque_df.columns)-1,f"CENASE · PAGOS DE ROL MEDIANTE CHEQUE · {period}",fmt_title)
+        for j,c in enumerate(cheque_df.columns):
+            ws.write(2,j,c,fmt_head)
+        widths={0:16,1:36,2:18,3:34,4:18,5:18}
+        for j,c in enumerate(cheque_df.columns):
+            ws.set_column(j,j,widths.get(j,18),fmt_money if c=="VALOR A PAGAR" else fmt_text)
+        ws.set_row(2,32)
+        ws.freeze_panes(3,0)
+        if len(cheque_df):
+            ws.autofilter(2,0,2+len(cheque_df),len(cheque_df.columns)-1)
+            total_row=3+len(cheque_df)
+            ws.write(total_row,4,"TOTAL",fmt_head)
+            ws.write_number(total_row,5,float(cheque_df["VALOR A PAGAR"].sum()),fmt_total)
+        else:
+            ws.write(4,0,"No existen trabajadores pendientes de pago mediante cheque para este período.",fmt_text)
+    out.seek(0)
+    return out.getvalue()
+
+
 def export_bank_payment_txt(bank_df):
     """Archivo tabulado para banco, excluyendo la columna interna PUESTO y el encabezado."""
     bank_cols=["INSTRUCCIÓN","IDENT. CLIENTE","TPO MONEDA","VALOR A PAGAR","FORMA DE PAGO","TIPO CUENTA","NUMERO DE CTA","REFERENCIA","TIPO DE IDENTIFICACION","NUM. ID","NOMBRE","COD. BCO"]
@@ -1996,10 +2039,20 @@ with tabs[10]:
             miss_show=bank_missing[["Cédula","Nombre","Tipo Rol","Puesto / Cliente","Neto a Recibir"]].copy()
             st.dataframe(miss_show,use_container_width=True,hide_index=True)
 
-        dx1,dx2=st.columns(2)
+        cheque_df=build_cheque_payment_report(bank_missing)
+        if len(cheque_df):
+            st.markdown("#### 🧾 Pagos que deben emitirse mediante cheque")
+            ch1,ch2=st.columns(2)
+            ch1.metric("Cheques a emitir",len(cheque_df))
+            ch2.metric("Total a pagar en cheques",fmt_money(cheque_df["VALOR A PAGAR"].sum()))
+            st.dataframe(cheque_df,use_container_width=True,hide_index=True,column_config={"VALOR A PAGAR":st.column_config.NumberColumn(format="$ %.2f")})
+
+        dx1,dx2,dx3=st.columns(3)
         excel_bank=export_bank_payment_excel(bank_df,mes_pdf)
         dx1.download_button("⬇️ Descargar plantilla bancaria en Excel",excel_bank,file_name=f"Pago_Rol_Banco_{mes_pdf}.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="bank_excel")
         txt_bank=export_bank_payment_txt(bank_df)
         dx2.download_button("⬇️ Descargar TXT tabulado para banco",txt_bank,file_name=f"Pago_Rol_Banco_{mes_pdf}.txt",mime="text/plain",use_container_width=True,key="bank_txt")
-        st.caption("El Excel incluye la columna PUESTO para control interno. El TXT excluye PUESTO y encabezados para mantener la estructura de carga bancaria.")
+        excel_cheques=export_cheque_payment_excel(cheque_df,mes_pdf)
+        dx3.download_button("🧾 Descargar reporte de pagos en cheque",excel_cheques,file_name=f"Pago_Rol_Cheques_{mes_pdf}.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="cheque_excel")
+        st.caption("El Excel bancario contiene únicamente quienes tienen cuenta para transferencia. El reporte de cheques contiene quienes no tienen cuenta bancaria y deben pagarse mediante CHEQUE. Solo se incluyen valores netos positivos.")
 
